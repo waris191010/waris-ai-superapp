@@ -1,0 +1,93 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  SUPERADMIN
+  ADMIN
+  USER
+  TEAM_MEMBER
+}
+
+enum Plan {
+  FREE
+  STARTER
+  PRO
+  BUSINESS
+  ENTERPRISE
+}
+
+model User {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  name          String?
+  passwordHash  String
+  role          Role           @default(USER)
+  currentPlan   Plan           @default(FREE)
+  credits       Float          @default(1000.0) // Kredit awal free user
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  
+  // Relations
+  historyLogs   AIHistoryLog[]
+  workspaces    WorkspaceMember[]
+  transactions  Transaction[]
+}
+
+model Workspace {
+  id          String            @id @default(uuid())
+  name        String
+  createdAt   DateTime          @default(now())
+  members     WorkspaceMember[]
+  sharedFiles SharedFile[]
+}
+
+model WorkspaceMember {
+  id          String    @id @default(uuid())
+  workspaceId String
+  userId      String
+  role        String    @default("member") // admin, member, viewer
+  
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model AIHistoryLog {
+  id          String   @id @default(uuid())
+  userId      String
+  studioType  String   // CHAT, IMAGE, VIDEO, VOICE, MUSIC, CODING
+  modelUsed   String   // e.g., gpt-4o, claude-3-5, flux-premium
+  promptInput String   @db.Text
+  outputData  String   @db.Text // Menyimpan text chat / URL media file (S3/R2)
+  creditsUsed Float
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model SharedFile {
+  id          String    @id @default(uuid())
+  workspaceId String
+  fileName    String
+  fileUrl     String
+  fileType    String
+  uploadedAt  DateTime  @default(now())
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+model Transaction {
+  id        String   @id @default(uuid())
+  userId    String
+  amount    Float
+  status    String   // SUCCESS, PENDING, FAILED
+  provider  String   // STRIPE, MIDTRANS, XENDIT, CRYPTO
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
