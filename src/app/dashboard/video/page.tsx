@@ -1,200 +1,314 @@
-﻿// src/app/dashboard/video/page.tsx
-"use client";
+﻿"use client";
 
 import { useState, useRef } from "react";
-import { Video, Image as ImageIcon, Loader2, AlertCircle } from "lucide-react";
+import { Upload, Video, Trash2, Download, AlertCircle, Mic } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type Mode = "text" | "image";
-type JobState = "idle" | "submitting" | "processing" | "done" | "error";
+interface SlideImage {
+  id: string;
+  url: string;
+  file: File;
+  duration: number; // seconds
+}
 
 export default function VideoStudioPage() {
-  const [mode, setMode] = useState<Mode>("text");
-  const [prompt, setPrompt] = useState("");
-  const [imageUrl, setImageUrl] = useState("");
-  const [duration, setDuration] = useState(6);
-  const [state, setState] = useState<JobState>("idle");
+  const [slides, setSlides] = useState<SlideImage[]>([]);
+  const [narration, setNarration] = useState("");
+  const [rendering, setRendering] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  function stopPolling() {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
+  function handleFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (!files) return;
+    const newSlides: SlideImage[] = Array.from(files).map((file, i) => ({
+      id: `${Date.now()}-${i}`,
+      url: URL.createObjectURL(file),
+      file,
+      duration: 3,
+    }));
+    setSlides((prev) => [...prev, ...newSlides]);
+    setError(null);
   }
 
-  async function handleGenerate() {
+  function removeSlide(id: string) {
+    setSlides((prev) => prev.filter((s) => s.id !== id));
+  }
+
+  function updateDuration(id: string, duration: number) {
+    setSlides((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, duration } : s))
+    );
+  }
+
+  async function handleCreateVideo() {
+    if (slides.length === 0) {
+      setError("Tambahkan minimal 1 gambar dulu.");
+      return;
+    }
+    if (typeof window === "undefined" || !("MediaRecorder" in window)) {
+      setError("Browser kamu tidak mendukung pembuatan video.");
+      return;
+    }
+
     setError(null);
+    setWarning(null);
+    setRendering(true);
+    setProgress(0);
     setVideoUrl(null);
 
-    if (!prompt.trim()) {
-      setError("Deskripsi video tidak boleh kosong.");
-      return;
-    }
-    if (mode === "image" && !imageUrl.trim()) {
-      setError("Masukkan URL gambar untuk mode image-to-video.");
-      return;
-    }
-
-    setState("submitting");
+    let displayStream: MediaStream | null = null;
 
     try {
-      const res = await fetch("/api/video/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt,
-          imageUrl: mode === "image" ? imageUrl : undefined,
-          durationSeconds: duration,
-        }),
-      });
-      const data = await res.json();
+      const canvas = canvasRef.current;
+      if (!canvas) throw new Error("Canvas tidak ditemukan.");
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Tidak bisa membuat context canvas.");
 
-      if (!res.ok) {
-        setError(data.error ?? "Gagal memulai pembuatan video.");
-        setState("error");
-        return;
+      canvas.width = 1280;
+      canvas.height = 720;
+
+      const canvasStream = (canvas as any).captureStream(30);
+      let combinedStream: MediaStream = canvasStream;
+
+      const wantsNarration = narration.trim().length > 0;
+
+      if (wantsNarration) {
+        if (
+          !("mediaDevices" in navigator) ||
+          !(navigator.mediaDevices as any).getDisplayMedia
+        ) {
+          setWarning(
+            "Browser kamu tidak mendukung perekaman suara narasi. Video akan dibuat tanpa suara."
+          );
+        } else {
+          try {
+            displayStream = await (navigator.mediaDevices as any).getDisplayMedia(
+              { video: true, audio: true }
+            );
+            const audioTracks = displayStream.getAudioTracks();
+            if (audioTracks.length === 0) {
+              setWarning(
+                "Kamu tidak mencentang 'Bagikan audio tab ini', jadi video dibuat tanpa suara."
+              );
+            } else {
+              combinedStream = new MediaStream([
+                ...canvasStream.getVideoTracks(),
+                ...audioTracks,
+              ]);
+            }
+          } catch (permErr) {
+            setWarning(
+              "Izin berbagi tab dibatalkan, video dibuat tanpa suara."
+            );
+          }
+        }
       }
 
-      setState("processing");
+      const recorder = new MediaRecorder(combinedStream, {
+        mimeType: "video/webm;codecs=vp9,opus",
+      });
 
-      pollRef.current = setInterval(async () => {
-        try {
-          const statusRes = await fetch(
-            `/api/video/status?jobId=${encodeURIComponent(data.jobId)}&prompt=${encodeURIComponent(prompt)}`
-          );
-          const statusData = await statusRes.json();
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (ev) => {
+        if (ev.data.size > 0) chunks.push(ev.data);
+      };
 
-          if (!statusRes.ok) {
-            setError(statusData.error ?? "Gagal memeriksa status video.");
-            setState("error");
-            stopPolling();
-            return;
-          }
+      const stopped = new Promise<void>((resolve) => {
+        recorder.onstop = () => resolve();
+      });
 
-          if (statusData.status === "completed") {
-            setVideoUrl(statusData.videoUrl);
-            setState("done");
-            stopPolling();
-          } else if (statusData.status === "error") {
-            setError(statusData.errorMessage ?? "Video gagal dibuat.");
-            setState("error");
-            stopPolling();
-          }
-        } catch {
-          setError("Koneksi terputus saat memeriksa status.");
-          setState("error");
-          stopPolling();
+      recorder.start();
+
+      if (wantsNarration && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(narration);
+        window.speechSynthesis.speak(utterance);
+      }
+
+      const images: HTMLImageElement[] = await Promise.all(
+        slides.map(
+          (s) =>
+            new Promise<HTMLImageElement>((resolve, reject) => {
+              const img = new Image();
+              img.onload = () => resolve(img);
+              img.onerror = reject;
+              img.src = s.url;
+            })
+        )
+      );
+
+      for (let i = 0; i < slides.length; i++) {
+        const img = images[i];
+        const durationMs = slides[i].duration * 1000;
+
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const scale = Math.min(
+          canvas.width / img.width,
+          canvas.height / img.height
+        );
+        const w = img.width * scale;
+        const h = img.height * scale;
+        const x = (canvas.width - w) / 2;
+        const y = (canvas.height - h) / 2;
+        ctx.drawImage(img, x, y, w, h);
+
+        await new Promise((r) => setTimeout(r, durationMs));
+        setProgress(Math.round(((i + 1) / slides.length) * 100));
+      }
+
+      if (wantsNarration && "speechSynthesis" in window) {
+        while (window.speechSynthesis.speaking) {
+          await new Promise((r) => setTimeout(r, 200));
         }
-      }, 5000);
-    } catch {
-      setError("Tidak bisa terhubung ke server.");
-      setState("error");
+      }
+
+      recorder.stop();
+      await stopped;
+
+      if (displayStream) {
+        displayStream.getTracks().forEach((t) => t.stop());
+      }
+
+      const blob = new Blob(chunks, { type: "video/webm" });
+      const url = URL.createObjectURL(blob);
+      setVideoUrl(url);
+    } catch (err) {
+      console.error(err);
+      setError("Gagal membuat video. Coba lagi.");
+      if (displayStream) {
+        displayStream.getTracks().forEach((t) => t.stop());
+      }
+    } finally {
+      setRendering(false);
     }
   }
 
-  const isBusy = state === "submitting" || state === "processing";
-
   return (
-    <div className="space-y-6 max-w-2xl">
-      <div>
-        <h1 className="text-2xl font-bold text-white">Video Studio</h1>
-        <p className="text-slate-400 text-sm mt-1">
-          Buat video dari teks atau gambar menggunakan Grok Imagine (xAI). Setiap generate memotong 50 kredit.
-        </p>
-      </div>
+    <div className="max-w-2xl">
+      <h1 className="text-2xl font-bold mb-1">Video Studio</h1>
+      <p className="text-sm text-slate-400 mb-5">
+        Buat video slideshow dari gambar, gratis langsung di browser, tanpa API key.
+      </p>
 
-      <div className="flex gap-2">
-        <button
-          onClick={() => setMode("text")}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border transition-colors ${
-            mode === "text"
-              ? "bg-brand-electric/10 border-brand-electric text-brand-electric"
-              : "border-slate-800 text-slate-400 hover:border-slate-700"
-          }`}
-        >
-          <Video className="w-4 h-4" /> Text to Video
-        </button>
-        <button
-          onClick={() => setMode("image")}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border transition-colors ${
-            mode === "image"
-              ? "bg-brand-electric/10 border-brand-electric text-brand-electric"
-              : "border-slate-800 text-slate-400 hover:border-slate-700"
-          }`}
-        >
-          <ImageIcon className="w-4 h-4" /> Image to Video
-        </button>
-      </div>
-
-      <div className="space-y-4 p-5 rounded-2xl bg-card border border-card-border">
-        {mode === "image" && (
-          <div>
-            <label className="block text-xs text-slate-400 mb-1">URL Gambar Sumber</label>
+      <div className="p-5 rounded-2xl bg-card border border-card-border space-y-4">
+        <div>
+          <label className="text-sm mb-2 block">Upload Gambar</label>
+          <label className="flex items-center justify-center gap-2 border border-dashed border-card-border rounded-xl p-6 cursor-pointer hover:bg-white/5 transition">
+            <Upload className="w-5 h-5" />
+            <span>Pilih gambar (bisa lebih dari satu)</span>
             <input
-              type="url"
-              value={imageUrl}
-              onChange={(e) => setImageUrl(e.target.value)}
-              placeholder="https://contoh.com/gambar.jpg"
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-electric/50"
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={handleFiles}
             />
-            <p className="text-[11px] text-slate-500 mt-1">
-              Tempel URL gambar yang bisa diakses publik (upload dulu ke layanan seperti Imgur, lalu tempel link-nya di sini).
-            </p>
+          </label>
+        </div>
+
+        {slides.length > 0 && (
+          <div className="space-y-3">
+            {slides.map((slide, i) => (
+              <div
+                key={slide.id}
+                className="flex items-center gap-3 p-2 rounded-xl border border-card-border"
+              >
+                <img
+                  src={slide.url}
+                  alt={`slide-${i}`}
+                  className="w-16 h-16 object-cover rounded-lg"
+                />
+                <div className="flex-1">
+                  <p className="text-xs text-slate-400 mb-1">
+                    Slide {i + 1} — durasi (detik)
+                  </p>
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={slide.duration}
+                    onChange={(e) =>
+                      updateDuration(slide.id, Number(e.target.value))
+                    }
+                    className="w-20 px-2 py-1 rounded-lg bg-black/20 border border-card-border text-sm"
+                  />
+                </div>
+                <button
+                  onClick={() => removeSlide(slide.id)}
+                  className="p-2 hover:bg-white/10 rounded-lg"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
           </div>
         )}
 
         <div>
-          <label className="block text-xs text-slate-400 mb-1">Deskripsi Video</label>
+          <label className="text-sm mb-2 flex items-center gap-2">
+            <Mic className="w-4 h-4" />
+            Narasi (opsional — eksperimental)
+          </label>
           <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={3}
-            placeholder="Contoh: Kucing oranye bermain piano di ruangan hangat, gaya sinematik"
-            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-electric/50 resize-none"
+            value={narration}
+            onChange={(e) => setNarration(e.target.value)}
+            placeholder="Tulis narasi yang mau diucapkan selama video diputar..."
+            className="w-full px-3 py-2 rounded-xl bg-black/20 border border-card-border text-sm min-h-[80px]"
           />
+          <p className="text-xs text-slate-500 mt-1">
+            Kalau diisi, saat klik "Buat Video" akan muncul pop-up minta izin
+            berbagi tab — centang "Bagikan audio tab ini" agar suara narasi
+            ikut terekam. Hanya berfungsi di Chrome/Edge.
+          </p>
         </div>
 
-        <div>
-          <label className="block text-xs text-slate-400 mb-1">Durasi (detik)</label>
-          <select
-            value={duration}
-            onChange={(e) => setDuration(Number(e.target.value))}
-            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-electric/50"
-          >
-            {[6, 8, 10, 15].map((s) => (
-              <option key={s} value={s}>{s} detik</option>
-            ))}
-          </select>
-        </div>
-
-        <Button onClick={handleGenerate} disabled={isBusy} className="w-full">
-          {isBusy ? (
-            <span className="flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              {state === "submitting" ? "Mengirim permintaan..." : "Sedang membuat video (bisa 1-2 menit)..."}
-            </span>
-          ) : (
-            "Generate Video"
-          )}
+        <Button
+          className="w-full"
+          onClick={handleCreateVideo}
+          disabled={rendering || slides.length === 0}
+        >
+          <span className="flex items-center justify-center gap-2">
+            <Video className="w-4 h-4" />
+            {rendering ? `Membuat video... ${progress}%` : "Buat Video"}
+          </span>
         </Button>
+
+        {warning && (
+          <div className="mt-2 flex items-start gap-2 rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
+            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <span className="text-sm">{warning}</span>
+          </div>
+        )}
+
+        {videoUrl && (
+          <div className="mt-4 p-4 rounded-xl bg-card border border-card-border space-y-3">
+            <p className="text-sm text-slate-400">Video kamu sudah siap:</p>
+            <video src={videoUrl} controls className="w-full rounded-lg" />
+            <a
+              href={videoUrl}
+              download="video-studio.webm"
+              className="inline-flex items-center gap-2 text-sm text-cyan-400 hover:underline"
+            >
+              <Download className="w-4 h-4" />
+              Download video (.webm)
+            </a>
+          </div>
+        )}
+
+        {error && (
+          <div className="mt-4 flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
+            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <canvas ref={canvasRef} className="hidden" />
       </div>
-
-      {error && (
-        <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-          <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
-
-      {videoUrl && (
-        <div className="p-5 rounded-2xl bg-card border border-card-border">
-          <p className="text-sm text-slate-400 mb-3">Video kamu sudah jadi:</p>
-          <video src={videoUrl} controls className="w-full rounded-xl" />
-        </div>
-      )}
     </div>
   );
 }
