@@ -1,4 +1,4 @@
-ï»¿"use client";
+"use client";
 
 import { useState, useRef } from "react";
 import { Upload, Video, Trash2, Download, AlertCircle, Mic } from "lucide-react";
@@ -89,7 +89,7 @@ export default function VideoStudioPage() {
             displayStream = await (navigator.mediaDevices as any).getDisplayMedia(
               { video: true, audio: true }
             );
-            const audioTracks = displayStream.getAudioTracks();
+            const audioTracks = displayStream?.getAudioTracks() ?? [];
             if (audioTracks.length === 0) {
               setWarning(
                 "Kamu tidak mencentang 'Bagikan audio tab ini', jadi video dibuat tanpa suara."
@@ -225,7 +225,7 @@ export default function VideoStudioPage() {
                 />
                 <div className="flex-1">
                   <p className="text-xs text-slate-400 mb-1">
-                    Slide {i + 1} â€” durasi (detik)
+                    Slide {i + 1} — durasi (detik)
                   </p>
                   <input
                     type="number"
@@ -252,7 +252,7 @@ export default function VideoStudioPage() {
         <div>
           <label className="text-sm mb-2 flex items-center gap-2">
             <Mic className="w-4 h-4" />
-            Narasi (opsional â€” eksperimental)
+            Narasi (opsional — eksperimental)
           </label>
           <textarea
             value={narration}
@@ -262,7 +262,7 @@ export default function VideoStudioPage() {
           />
           <p className="text-xs text-slate-500 mt-1">
             Kalau diisi, saat klik "Buat Video" akan muncul pop-up minta izin
-            berbagi tab â€” centang "Bagikan audio tab ini" agar suara narasi
+            berbagi tab — centang "Bagikan audio tab ini" agar suara narasi
             ikut terekam. Hanya berfungsi di Chrome/Edge.
           </p>
         </div>
