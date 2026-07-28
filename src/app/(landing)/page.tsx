@@ -83,6 +83,15 @@ export default function LandingPage() {
           <ServiceCard icon={<Zap className="text-amber-500" />} title="AI Agents & Automation" items={["Marketplace Agent", "SaaS Automation Workflow", "Prompt Library Pack", "Team Space"]} />
         </div>
       </section>
+      {/* DEMO SECTION */}
+        <section id="demo" className="container mx-auto px-6 py-20 relative z-10 text-center">
+          <h2 className="text-3xl font-bold mb-6">Demo Dashboard</h2>
+          <div className="max-w-3xl mx-auto p-10 rounded-2xl bg-card border border-card-border">
+            <p className="text-slate-400">
+              Demo dashboard akan segera hadir di sini. Nantikan tampilan lengkapnya!
+            </p>
+          </div>
+        </section>
     </div>
   );
 }
