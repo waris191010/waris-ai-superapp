@@ -1,313 +1,414 @@
-"use client";
+'use client';
 
-import { useState, useRef } from "react";
-import { Upload, Video, Trash2, Download, AlertCircle, Mic } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { useState, useRef, useCallback } from 'react';
 
-interface SlideImage {
-  id: string;
-  url: string;
-  file: File;
-  duration: number; // seconds
+interface Scene {
+  id: number;
+  imageUrl: string | null;
+  caption: string;
+  manualDuration: number;
+  audioBlob: Blob | null;
+  audioUrl: string | null;
+  audioDuration: number;
+  kbDirection: 1 | -1;
+}
+
+let sceneIdSeq = 1;
+
+function fmtTime(s: number) {
+  s = Math.max(0, s);
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+function drawCoverImage(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  img: HTMLImageElement,
+  kbProgress: number,
+  direction: number
+) {
+  const cw = canvas.width, ch = canvas.height;
+  const scale = 1 + 0.12 * kbProgress;
+  const iw = img.width, ih = img.height;
+  const canvasRatio = cw / ch, imgRatio = iw / ih;
+  let drawW: number, drawH: number;
+  if (imgRatio > canvasRatio) { drawH = ch * scale; drawW = drawH * imgRatio; }
+  else { drawW = cw * scale; drawH = drawW / imgRatio; }
+  const offsetX = (cw - drawW) / 2 + direction * 20 * kbProgress;
+  const offsetY = (ch - drawH) / 2;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, cw, ch);
+  ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
+}
+
+function drawCaption(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, text: string, opacity: number) {
+  if (!text) return;
+  const cw = canvas.width, ch = canvas.height;
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  const maxWidth = cw - 120;
+  ctx.font = "600 34px 'Space Grotesk', sans-serif";
+  const words = text.split(' ');
+  const lines: string[] = [];
+  let line = '';
+  words.forEach((w) => {
+    const test = line + w + ' ';
+    if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = w + ' '; }
+    else line = test;
+  });
+  lines.push(line);
+  const lineHeight = 46;
+  const boxHeight = lines.length * lineHeight + 40;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, ch - boxHeight - 30, cw, boxHeight + 30);
+  ctx.fillStyle = '#f3ede1';
+  ctx.textAlign = 'center';
+  lines.forEach((l, i) => {
+    ctx.fillText(l.trim(), cw / 2, ch - boxHeight + 20 + i * lineHeight);
+  });
+  ctx.restore();
 }
 
 export default function VideoStudioPage() {
-  const [slides, setSlides] = useState<SlideImage[]>([]);
-  const [narration, setNarration] = useState("");
-  const [rendering, setRendering] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [scenes, setScenes] = useState<Scene[]>([
+    { id: sceneIdSeq++, imageUrl: null, caption: '', manualDuration: 4, audioBlob: null, audioUrl: null, audioDuration: 0, kbDirection: 1 },
+  ]);
+  const [isRendering, setIsRendering] = useState(false);
+  const [status, setStatus] = useState('Tambahkan scene untuk mulai.');
+  const [statusErr, setStatusErr] = useState(false);
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [resultVideoUrl, setResultVideoUrl] = useState<string | null>(null);
+  const [recordingSceneId, setRecordingSceneId] = useState<number | null>(null);
+  const [timecode, setTimecode] = useState('00:00 / 00:00');
 
-  function handleFiles(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = e.target.files;
-    if (!files) return;
-    const newSlides: SlideImage[] = Array.from(files).map((file, i) => ({
-      id: `${Date.now()}-${i}`,
-      url: URL.createObjectURL(file),
-      file,
-      duration: 3,
-    }));
-    setSlides((prev) => [...prev, ...newSlides]);
-    setError(null);
-  }
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRefs = useRef<Record<number, HTMLInputElement | null>>({});
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
 
-  function removeSlide(id: string) {
-    setSlides((prev) => prev.filter((s) => s.id !== id));
-  }
+  const totalDuration = scenes.reduce((acc, s) => acc + (s.audioBlob ? s.audioDuration : s.manualDuration), 0);
 
-  function updateDuration(id: string, duration: number) {
-    setSlides((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, duration } : s))
-    );
-  }
+  const addScene = () => {
+    setScenes((prev) => [...prev, {
+      id: sceneIdSeq++, imageUrl: null, caption: '', manualDuration: 4,
+      audioBlob: null, audioUrl: null, audioDuration: 0,
+      kbDirection: Math.random() > 0.5 ? 1 : -1,
+    }]);
+  };
 
-  async function handleCreateVideo() {
-    if (slides.length === 0) {
-      setError("Tambahkan minimal 1 gambar dulu.");
+  const removeScene = (id: number) => setScenes((prev) => prev.filter((s) => s.id !== id));
+
+  const updateScene = (id: number, patch: Partial<Scene>) => {
+    setScenes((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  };
+
+  const handleImageUpload = (id: number, file: File) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => updateScene(id, { imageUrl: ev.target?.result as string });
+    reader.readAsDataURL(file);
+  };
+
+  const speakCaption = (text: string) => {
+    if (!text.trim()) { setStatus('Isi captionnya dulu ya.'); setStatusErr(true); return; }
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = 'id-ID';
+    window.speechSynthesis.speak(utter);
+  };
+
+  const toggleRecord = async (id: number) => {
+    if (recordingSceneId === id) {
+      mediaRecorderRef.current?.stop();
       return;
     }
-    if (typeof window === "undefined" || !("MediaRecorder" in window)) {
-      setError("Browser kamu tidak mendukung pembuatan video.");
-      return;
+    if (recordingSceneId !== null) { setStatus('Selesaikan rekaman scene lain dulu.'); setStatusErr(true); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      const chunks: BlobPart[] = [];
+      const mr = new MediaRecorder(stream);
+      mediaRecorderRef.current = mr;
+      setRecordingSceneId(id);
+      mr.ondataavailable = (e) => chunks.push(e.data);
+      mr.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const url = URL.createObjectURL(blob);
+        const tempAudio = new Audio(url);
+        tempAudio.onloadedmetadata = () => {
+          updateScene(id, { audioBlob: blob, audioUrl: url, audioDuration: tempAudio.duration });
+          setRecordingSceneId(null);
+          mediaRecorderRef.current = null;
+        };
+      };
+      mr.start();
+    } catch (err: any) {
+      setStatus('Tidak bisa akses mic: ' + err.message);
+      setStatusErr(true);
     }
+  };
 
-    setError(null);
-    setWarning(null);
-    setRendering(true);
-    setProgress(0);
-    setVideoUrl(null);
+  const clearAudio = (id: number) => updateScene(id, { audioBlob: null, audioUrl: null, audioDuration: 0 });
 
-    let displayStream: MediaStream | null = null;
+  const playScene = useCallback((
+    scene: Scene,
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    destination: MediaStreamAudioDestinationNode,
+    audioCtx: AudioContext,
+    elapsedBefore: number,
+    total: number
+  ): Promise<void> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const duration = scene.audioBlob ? scene.audioDuration : scene.manualDuration;
+        let sourceNode: MediaElementAudioSourceNode | null = null;
+        if (scene.audioBlob && scene.audioUrl) {
+          const audioEl = new Audio(scene.audioUrl);
+          sourceNode = audioCtx.createMediaElementSource(audioEl);
+          sourceNode.connect(destination);
+          audioEl.play();
+        }
+        const start = performance.now();
+        const frame = (now: number) => {
+          const elapsedInScene = (now - start) / 1000;
+          const progress = Math.min(1, elapsedInScene / duration);
+          drawCoverImage(ctx, canvas, img, progress, scene.kbDirection);
+          drawCaption(ctx, canvas, scene.caption, Math.min(1, elapsedInScene * 3));
+          setTimecode(`${fmtTime(elapsedBefore + elapsedInScene)} / ${fmtTime(total)}`);
+          if (progress < 1) requestAnimationFrame(frame);
+          else { sourceNode?.disconnect(); resolve(); }
+        };
+        requestAnimationFrame(frame);
+      };
+      img.src = scene.imageUrl as string;
+    });
+  }, []);
+
+  const renderVideo = async () => {
+    const validScenes = scenes.filter((s) => s.imageUrl);
+    if (validScenes.length === 0) { setStatus('Tambahkan minimal 1 scene dengan gambar.'); setStatusErr(true); return; }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    setIsRendering(true);
+    setStatusErr(false);
+    setDownloadUrl(null);
+    setResultVideoUrl(null);
+    setStatus('Menyiapkan recorder...');
 
     try {
-      const canvas = canvasRef.current;
-      if (!canvas) throw new Error("Canvas tidak ditemukan.");
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("Tidak bisa membuat context canvas.");
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const audioCtx = new AudioContextClass();
+      const destination = audioCtx.createMediaStreamDestination();
+      const canvasStream = canvas.captureStream(30);
+      const combined = new MediaStream([
+        ...canvasStream.getVideoTracks(),
+        ...destination.stream.getAudioTracks(),
+      ]);
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+        ? 'video/webm;codecs=vp9,opus' : 'video/webm';
+      const recorder = new MediaRecorder(combined, { mimeType });
+      const chunks: BlobPart[] = [];
+      recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
 
-      canvas.width = 1280;
-      canvas.height = 720;
+      const total = validScenes.reduce((a, s) => a + (s.audioBlob ? s.audioDuration : s.manualDuration), 0);
+      let elapsedBefore = 0;
 
-      const canvasStream = (canvas as any).captureStream(30);
-      let combinedStream: MediaStream = canvasStream;
-
-      const wantsNarration = narration.trim().length > 0;
-
-      if (wantsNarration) {
-        if (
-          !("mediaDevices" in navigator) ||
-          !(navigator.mediaDevices as any).getDisplayMedia
-        ) {
-          setWarning(
-            "Browser kamu tidak mendukung perekaman suara narasi. Video akan dibuat tanpa suara."
-          );
-        } else {
-          try {
-            displayStream = await (navigator.mediaDevices as any).getDisplayMedia(
-              { video: true, audio: true }
-            );
-            const audioTracks = displayStream?.getAudioTracks() ?? [];
-            if (audioTracks.length === 0) {
-              setWarning(
-                "Kamu tidak mencentang 'Bagikan audio tab ini', jadi video dibuat tanpa suara."
-              );
-            } else {
-              combinedStream = new MediaStream([
-                ...canvasStream.getVideoTracks(),
-                ...audioTracks,
-              ]);
-            }
-          } catch (permErr) {
-            setWarning(
-              "Izin berbagi tab dibatalkan, video dibuat tanpa suara."
-            );
-          }
-        }
-      }
-
-      const recorder = new MediaRecorder(combinedStream, {
-        mimeType: "video/webm;codecs=vp9,opus",
-      });
-
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (ev) => {
-        if (ev.data.size > 0) chunks.push(ev.data);
-      };
-
-      const stopped = new Promise<void>((resolve) => {
-        recorder.onstop = () => resolve();
+      const stopped = new Promise<Blob>((resolve) => {
+        recorder.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' }));
       });
 
       recorder.start();
+      setStatus('Merender video...');
 
-      if (wantsNarration && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(narration);
-        window.speechSynthesis.speak(utterance);
-      }
-
-      const images: HTMLImageElement[] = await Promise.all(
-        slides.map(
-          (s) =>
-            new Promise<HTMLImageElement>((resolve, reject) => {
-              const img = new Image();
-              img.onload = () => resolve(img);
-              img.onerror = reject;
-              img.src = s.url;
-            })
-        )
-      );
-
-      for (let i = 0; i < slides.length; i++) {
-        const img = images[i];
-        const durationMs = slides[i].duration * 1000;
-
-        ctx.fillStyle = "#000000";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        const scale = Math.min(
-          canvas.width / img.width,
-          canvas.height / img.height
-        );
-        const w = img.width * scale;
-        const h = img.height * scale;
-        const x = (canvas.width - w) / 2;
-        const y = (canvas.height - h) / 2;
-        ctx.drawImage(img, x, y, w, h);
-
-        await new Promise((r) => setTimeout(r, durationMs));
-        setProgress(Math.round(((i + 1) / slides.length) * 100));
-      }
-
-      if (wantsNarration && "speechSynthesis" in window) {
-        while (window.speechSynthesis.speaking) {
-          await new Promise((r) => setTimeout(r, 200));
-        }
+      for (const scene of validScenes) {
+        await playScene(scene, ctx, canvas, destination, audioCtx, elapsedBefore, total);
+        elapsedBefore += scene.audioBlob ? scene.audioDuration : scene.manualDuration;
       }
 
       recorder.stop();
-      await stopped;
-
-      if (displayStream) {
-        displayStream.getTracks().forEach((t) => t.stop());
-      }
-
-      const blob = new Blob(chunks, { type: "video/webm" });
+      const blob = await stopped;
       const url = URL.createObjectURL(blob);
-      setVideoUrl(url);
-    } catch (err) {
-      console.error(err);
-      setError("Gagal membuat video. Coba lagi.");
-      if (displayStream) {
-        displayStream.getTracks().forEach((t) => t.stop());
-      }
+      setResultVideoUrl(url);
+      setDownloadUrl(url);
+      setStatus('Selesai. Video siap diunduh (format WebM).');
+    } catch (err: any) {
+      setStatus('Gagal render: ' + err.message);
+      setStatusErr(true);
     } finally {
-      setRendering(false);
+      setIsRendering(false);
     }
-  }
+  };
 
   return (
-    <div className="max-w-2xl">
-      <h1 className="text-2xl font-bold mb-1">Video Studio</h1>
-      <p className="text-sm text-slate-400 mb-5">
-        Buat video slideshow dari gambar, gratis langsung di browser, tanpa API key.
-      </p>
+    <div style={{ background: 'var(--bg-void)', minHeight: '100vh', color: 'var(--text-cream)' }}>
+      <style>{`
+        :root{
+          --bg-void:#15130f; --bg-panel:#201b14; --bg-panel-2:#2a2318; --bg-panel-3:#332a1c;
+          --accent-amber:#e8a33d; --accent-amber-dim:#8a642a; --accent-teal:#4a8a80;
+          --text-cream:#f3ede1; --text-muted:#b3a892; --border-line:#3a3226; --danger:#c1553d;
+        }
+        .vs-wrap{max-width:1180px;margin:0 auto;padding:28px 20px 80px;font-family:'Inter',sans-serif;}
+        .vs-header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:24px;flex-wrap:wrap;border-bottom:1px solid var(--border-line);padding-bottom:18px;}
+        .vs-brand{display:flex;align-items:center;gap:12px;}
+        .vs-dot{width:12px;height:12px;border-radius:50%;background:var(--accent-amber);box-shadow:0 0 10px var(--accent-amber);}
+        .vs-brand h1{font-family:'Space Grotesk',sans-serif;font-size:22px;margin:0;}
+        .vs-tag{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-muted);letter-spacing:1.5px;text-transform:uppercase;margin-top:2px;}
+        .vs-counter{font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);border:1px solid var(--border-line);padding:6px 12px;border-radius:4px;background:var(--bg-panel);}
+        .vs-counter b{color:var(--text-cream);}
+        .vs-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;}
+        @media (max-width:920px){.vs-grid{grid-template-columns:1fr;}}
+        .vs-reel{position:relative;padding-left:22px;}
+        .vs-reel::before{content:"";position:absolute;left:0;top:0;bottom:0;width:14px;background-image:radial-gradient(circle, var(--bg-void) 3px, transparent 3.5px);background-size:14px 22px;background-color:var(--bg-panel-3);border-radius:3px;}
+        .vs-section-title{font-family:'Space Grotesk',sans-serif;font-size:14px;text-transform:uppercase;letter-spacing:1.5px;color:var(--accent-amber);margin:0 0 14px;}
+        .vs-scene-card{background:var(--bg-panel);border:1px solid var(--border-line);border-radius:8px;padding:14px;margin-bottom:14px;position:relative;}
+        .vs-scene-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+        .vs-scene-num{font-family:'IBM Plex Mono',monospace;color:var(--accent-amber);font-size:13px;}
+        .vs-scene-remove{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:2px 6px;}
+        .vs-scene-remove:hover{color:var(--danger);}
+        .vs-scene-body{display:grid;grid-template-columns:96px 1fr;gap:12px;}
+        .vs-thumb{width:96px;height:96px;border-radius:6px;background:var(--bg-panel-2);border:1px dashed var(--border-line);display:flex;align-items:center;justify-content:center;background-size:cover;background-position:center;cursor:pointer;overflow:hidden;flex-shrink:0;font-size:11px;color:var(--text-muted);text-align:center;padding:4px;}
+        .vs-thumb:hover{border-color:var(--accent-amber);}
+        .vs-cap{width:100%;min-height:56px;resize:vertical;background:var(--bg-panel-2);border:1px solid var(--border-line);border-radius:6px;color:var(--text-cream);font-family:'Inter',sans-serif;font-size:13px;padding:8px 10px;}
+        .vs-cap:focus{outline:none;border-color:var(--accent-amber);}
+        .vs-row-controls{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;}
+        .vs-mini-btn{font-family:'IBM Plex Mono',monospace;font-size:11px;background:var(--bg-panel-2);border:1px solid var(--border-line);color:var(--text-cream);padding:6px 10px;border-radius:5px;cursor:pointer;}
+        .vs-mini-btn:hover{border-color:var(--accent-amber);}
+        .vs-mini-btn.rec-active{background:var(--danger);border-color:var(--danger);color:#fff;}
+        .vs-mini-btn.has-audio{border-color:var(--accent-teal);color:var(--accent-teal);}
+        .vs-dur-slider{display:flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-muted);}
+        .vs-dur-slider input{width:80px;accent-color:var(--accent-amber);}
+        .vs-add-scene{width:100%;padding:12px;border:1px dashed var(--border-line);border-radius:8px;background:transparent;color:var(--text-muted);font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:0.5px;cursor:pointer;text-transform:uppercase;}
+        .vs-add-scene:hover{border-color:var(--accent-amber);color:var(--accent-amber);}
+        .vs-preview-panel{position:sticky;top:20px;align-self:start;}
+        .vs-screen{background:#000;border-radius:10px;overflow:hidden;position:relative;border:1px solid var(--border-line);}
+        .vs-screen canvas, .vs-screen video{width:100%;display:block;aspect-ratio:16/9;background:#000;}
+        .vs-timecode{position:absolute;bottom:10px;right:10px;font-family:'IBM Plex Mono',monospace;font-size:11px;background:rgba(0,0,0,0.55);padding:4px 8px;border-radius:4px;}
+        .vs-controls-bar{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap;}
+        .vs-btn-primary{flex:1;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:14px;background:var(--accent-amber);color:#221806;border:none;border-radius:7px;padding:13px 18px;cursor:pointer;}
+        .vs-btn-primary:hover{background:#f2b356;}
+        .vs-btn-primary:disabled{background:var(--accent-amber-dim);color:#4a3c22;cursor:not-allowed;}
+        .vs-btn-secondary{font-family:'IBM Plex Mono',monospace;font-size:12px;background:transparent;color:var(--text-muted);border:1px solid var(--border-line);border-radius:7px;padding:13px 16px;cursor:pointer;}
+        .vs-btn-secondary:hover{border-color:var(--accent-teal);color:var(--accent-teal);}
+        .vs-status-line{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text-muted);margin-top:12px;min-height:16px;}
+        .vs-status-line.err{color:var(--danger);}
+        .vs-download-box{margin-top:16px;padding:14px;background:var(--bg-panel);border:1px solid var(--accent-teal);border-radius:8px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
+        .vs-download-box a{font-family:'Space Grotesk',sans-serif;font-weight:600;color:var(--accent-teal);text-decoration:none;font-size:13px;background:rgba(74,138,128,0.15);padding:9px 14px;border-radius:6px;}
+        .vs-note{font-family:'Inter',sans-serif;font-size:12px;color:var(--text-muted);line-height:1.6;margin-top:16px;padding:12px 14px;background:var(--bg-panel);border-radius:8px;border:1px solid var(--border-line);}
+        .vs-note b{color:var(--text-cream);}
+      `}</style>
 
-      <div className="p-5 rounded-2xl bg-card border border-card-border space-y-4">
-        <div>
-          <label className="text-sm mb-2 block">Upload Gambar</label>
-          <label className="flex items-center justify-center gap-2 border border-dashed border-card-border rounded-xl p-6 cursor-pointer hover:bg-white/5 transition">
-            <Upload className="w-5 h-5" />
-            <span>Pilih gambar (bisa lebih dari satu)</span>
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              className="hidden"
-              onChange={handleFiles}
-            />
-          </label>
-        </div>
+      <div className="vs-wrap">
+        <header className="vs-header">
+          <div className="vs-brand">
+            <div className="vs-dot" />
+            <div>
+              <h1>Video Studio</h1>
+              <div className="vs-tag">Narasi · Gambar · Caption &rarr; Video · Gratis di Browser</div>
+            </div>
+          </div>
+          <div className="vs-counter">
+            SCENE <b>{scenes.length}</b> &nbsp;|&nbsp; DURASI <b>{fmtTime(totalDuration)}</b>
+          </div>
+        </header>
 
-        {slides.length > 0 && (
-          <div className="space-y-3">
-            {slides.map((slide, i) => (
-              <div
-                key={slide.id}
-                className="flex items-center gap-3 p-2 rounded-xl border border-card-border"
-              >
-                <img
-                  src={slide.url}
-                  alt={`slide-${i}`}
-                  className="w-16 h-16 object-cover rounded-lg"
-                />
-                <div className="flex-1">
-                  <p className="text-xs text-slate-400 mb-1">
-                    Slide {i + 1} — durasi (detik)
-                  </p>
+        <div className="vs-grid">
+          <div>
+            <p className="vs-section-title">Susun Scene</p>
+            <div className="vs-reel">
+              {scenes.map((scene, idx) => (
+                <div className="vs-scene-card" key={scene.id}>
+                  <div className="vs-scene-head">
+                    <span className="vs-scene-num">SCENE {String(idx + 1).padStart(2, '0')}</span>
+                    <button className="vs-scene-remove" onClick={() => removeScene(scene.id)}>✕</button>
+                  </div>
+                  <div className="vs-scene-body">
+                    <div
+                      className="vs-thumb"
+                      style={scene.imageUrl ? { backgroundImage: `url(${scene.imageUrl})` } : {}}
+                      onClick={() => fileInputRefs.current[scene.id]?.click()}
+                    >
+                      {!scene.imageUrl && '+ Gambar'}
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <textarea
+                        className="vs-cap"
+                        placeholder="Tulis narasi / caption scene ini..."
+                        value={scene.caption}
+                        onChange={(e) => updateScene(scene.id, { caption: e.target.value })}
+                      />
+                      <div className="vs-row-controls">
+                        <button
+                          className={`vs-mini-btn ${scene.audioBlob ? 'has-audio' : ''} ${recordingSceneId === scene.id ? 'rec-active' : ''}`}
+                          onClick={() => toggleRecord(scene.id)}
+                        >
+                          {recordingSceneId === scene.id
+                            ? '⏺ Rekam... (klik utk stop)'
+                            : scene.audioBlob
+                              ? `✓ Suara (${scene.audioDuration.toFixed(1)}s)`
+                              : '🎤 Rekam Suara'}
+                        </button>
+                        <button className="vs-mini-btn" onClick={() => speakCaption(scene.caption)}>🔊 Coba Baca</button>
+                        {scene.audioBlob && (
+                          <button className="vs-mini-btn" onClick={() => clearAudio(scene.id)}>Hapus Suara</button>
+                        )}
+                        {!scene.audioBlob && (
+                          <div className="vs-dur-slider">
+                            <span>Durasi</span>
+                            <input
+                              type="range" min={1} max={12} step={0.5}
+                              value={scene.manualDuration}
+                              onChange={(e) => updateScene(scene.id, { manualDuration: +e.target.value })}
+                            />
+                            <span>{scene.manualDuration}s</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                   <input
-                    type="number"
-                    min={1}
-                    max={30}
-                    value={slide.duration}
-                    onChange={(e) =>
-                      updateDuration(slide.id, Number(e.target.value))
-                    }
-                    className="w-20 px-2 py-1 rounded-lg bg-black/20 border border-card-border text-sm"
+                    type="file" accept="image/*" style={{ display: 'none' }}
+                    ref={(el) => { fileInputRefs.current[scene.id] = el; }}
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImageUpload(scene.id, f); }}
                   />
                 </div>
-                <button
-                  onClick={() => removeSlide(slide.id)}
-                  className="p-2 hover:bg-white/10 rounded-lg"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+              ))}
+            </div>
+            <button className="vs-add-scene" onClick={addScene}>+ Tambah Scene</button>
+          </div>
+
+          <div className="vs-preview-panel">
+            <p className="vs-section-title">Preview &amp; Render</p>
+            <div className="vs-screen">
+              {resultVideoUrl ? (
+                <video src={resultVideoUrl} controls />
+              ) : (
+                <canvas ref={canvasRef} width={1280} height={720} />
+              )}
+              <div className="vs-timecode">{timecode}</div>
+            </div>
+            <div className="vs-controls-bar">
+              <button className="vs-btn-primary" disabled={isRendering} onClick={renderVideo}>▶ Render Video</button>
+              <button className="vs-btn-secondary" onClick={() => window.location.reload()}>Reset</button>
+            </div>
+            <div className={`vs-status-line ${statusErr ? 'err' : ''}`}>{status}</div>
+            {downloadUrl && (
+              <div className="vs-download-box">
+                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: 'var(--text-muted)' }}>Video siap ✓</span>
+                <a href={downloadUrl} download="video-studio-export.webm">Unduh Video</a>
               </div>
-            ))}
+            )}
+            <div className="vs-note">
+              <b>Cara narasi:</b> tiap scene punya tombol <b>🎤 Rekam Suara</b> (mic Anda sendiri) dan <b>🔊 Coba Baca</b> (Text-to-Speech browser, hanya pratinjau — tidak bisa direkam langsung ke video karena batasan browser). Tanpa rekaman suara, durasi scene pakai slider manual dan bagian itu senyap.
+            </div>
           </div>
-        )}
-
-        <div>
-          <label className="text-sm mb-2 flex items-center gap-2">
-            <Mic className="w-4 h-4" />
-            Narasi (opsional — eksperimental)
-          </label>
-          <textarea
-            value={narration}
-            onChange={(e) => setNarration(e.target.value)}
-            placeholder="Tulis narasi yang mau diucapkan selama video diputar..."
-            className="w-full px-3 py-2 rounded-xl bg-black/20 border border-card-border text-sm min-h-[80px]"
-          />
-          <p className="text-xs text-slate-500 mt-1">
-            Kalau diisi, saat klik "Buat Video" akan muncul pop-up minta izin
-            berbagi tab — centang "Bagikan audio tab ini" agar suara narasi
-            ikut terekam. Hanya berfungsi di Chrome/Edge.
-          </p>
         </div>
-
-        <Button
-          className="w-full"
-          onClick={handleCreateVideo}
-          disabled={rendering || slides.length === 0}
-        >
-          <span className="flex items-center justify-center gap-2">
-            <Video className="w-4 h-4" />
-            {rendering ? `Membuat video... ${progress}%` : "Buat Video"}
-          </span>
-        </Button>
-
-        {warning && (
-          <div className="mt-2 flex items-start gap-2 rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
-            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            <span className="text-sm">{warning}</span>
-          </div>
-        )}
-
-        {videoUrl && (
-          <div className="mt-4 p-4 rounded-xl bg-card border border-card-border space-y-3">
-            <p className="text-sm text-slate-400">Video kamu sudah siap:</p>
-            <video src={videoUrl} controls className="w-full rounded-lg" />
-            <a
-              href={videoUrl}
-              download="video-studio.webm"
-              className="inline-flex items-center gap-2 text-sm text-cyan-400 hover:underline"
-            >
-              <Download className="w-4 h-4" />
-              Download video (.webm)
-            </a>
-          </div>
-        )}
-
-        {error && (
-          <div className="mt-4 flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
-            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            <span>{error}</span>
-          </div>
-        )}
-
-        <canvas ref={canvasRef} className="hidden" />
       </div>
     </div>
   );
