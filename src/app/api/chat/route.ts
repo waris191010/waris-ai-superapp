@@ -83,6 +83,47 @@ async function callGrok(prompt: string, messages: { role: string; content: strin
   return data?.choices?.[0]?.message?.content ?? "Maaf, tidak ada respons dari AI.";
 }
 
+// Integrasi Groq (GroqCloud) — beda dengan Grok (xAI) di atas. Groq adalah
+// penyedia inference super cepat untuk model open-source (Llama, GPT-OSS, dll).
+// Endpoint-nya juga kompatibel format OpenAI, jadi strukturnya sama persis
+// dengan callGrok, hanya beda base URL, model, dan env variable key-nya.
+async function callGroq(prompt: string, messages: { role: string; content: string }[]) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    throw new Error("GROQ_API_KEY belum diatur di server.");
+  }
+
+  const chatMessages = [
+    ...(Array.isArray(messages) ? messages : []).map((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.content,
+    })),
+    { role: "user", content: prompt },
+  ];
+
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "openai/gpt-oss-120b",
+      messages: chatMessages,
+      temperature: 0.7,
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("Groq API error:", errText);
+    throw new Error("Gagal menghubungi Groq API.");
+  }
+
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content ?? "Maaf, tidak ada respons dari AI.";
+}
+
 export async function POST(req: Request) {
   try {
     const token = cookies().get(AUTH_COOKIE_NAME)?.value;
@@ -116,14 +157,22 @@ export async function POST(req: Request) {
     let aiResponseText = "";
     let calculatedCost = 2.0; // Biaya default per hit token
 
-    // 2. Grok sudah aktif lewat XAI_API_KEY. Model lain (gpt-4o, claude-3-5-sonnet,
-    // deepseek-r1) masih diarahkan sementara ke Gemini sampai API key masing-masing
-    // tersedia — tinggal ganti pemanggilannya nanti dengan cara yang sama seperti Grok.
+    // 2. Grok (xAI) dan Groq (GroqCloud) sudah aktif, masing-masing pakai
+    // env variable dan endpoint sendiri sehingga tidak saling tabrakan.
+    // Model lain (gpt-4o, claude-3-5-sonnet, deepseek-r1) masih diarahkan
+    // sementara ke Gemini sampai API key masing-masing tersedia.
     switch (modelSelected?.toLowerCase()) {
       case "grok":
       case "grok-4.3":
         aiResponseText = await callGrok(prompt, messages);
         calculatedCost = 3.0;
+        break;
+
+      case "groq":
+      case "groq-llama":
+      case "gpt-oss":
+        aiResponseText = await callGroq(prompt, messages);
+        calculatedCost = 1.5;
         break;
 
       case "gpt-4o":
