@@ -43,6 +43,46 @@ async function callGemini(prompt: string, messages: { role: string; content: str
   );
 }
 
+// Integrasi Grok (xAI). Endpoint-nya kompatibel dengan format OpenAI
+// (chat/completions), jadi strukturnya mirip callGemini di atas tapi
+// pakai skema messages: [{ role, content }] langsung tanpa "parts".
+async function callGrok(prompt: string, messages: { role: string; content: string }[]) {
+  const apiKey = process.env.XAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("XAI_API_KEY belum diatur di server.");
+  }
+
+  const chatMessages = [
+    ...(Array.isArray(messages) ? messages : []).map((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.content,
+    })),
+    { role: "user", content: prompt },
+  ];
+
+  const response = await fetch("https://api.x.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "grok-4.3",
+      messages: chatMessages,
+      temperature: 0.7,
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("Grok API error:", errText);
+    throw new Error("Gagal menghubungi Grok API.");
+  }
+
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content ?? "Maaf, tidak ada respons dari AI.";
+}
+
 export async function POST(req: Request) {
   try {
     const token = cookies().get(AUTH_COOKIE_NAME)?.value;
@@ -76,10 +116,16 @@ export async function POST(req: Request) {
     let aiResponseText = "";
     let calculatedCost = 2.0; // Biaya default per hit token
 
-    // 2. Semua pilihan model untuk sementara diarahkan ke Gemini (satu-satunya API key yang aktif).
-    // Nanti kalau sudah punya API key OpenAI/Anthropic/DeepSeek, tinggal tambahkan pemanggilan
-    // SDK masing-masing di dalam case yang sesuai, menggantikan pemanggilan Gemini di bawah ini.
+    // 2. Grok sudah aktif lewat XAI_API_KEY. Model lain (gpt-4o, claude-3-5-sonnet,
+    // deepseek-r1) masih diarahkan sementara ke Gemini sampai API key masing-masing
+    // tersedia — tinggal ganti pemanggilannya nanti dengan cara yang sama seperti Grok.
     switch (modelSelected?.toLowerCase()) {
+      case "grok":
+      case "grok-4.3":
+        aiResponseText = await callGrok(prompt, messages);
+        calculatedCost = 3.0;
+        break;
+
       case "gpt-4o":
         aiResponseText = await callGemini(prompt, messages);
         calculatedCost = 5.0;
