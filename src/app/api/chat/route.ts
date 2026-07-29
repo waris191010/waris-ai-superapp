@@ -124,14 +124,60 @@ async function callGroq(prompt: string, messages: { role: string; content: strin
   return data?.choices?.[0]?.message?.content ?? "Maaf, tidak ada respons dari AI.";
 }
 
+// Integrasi OpenRouter — gateway ke puluhan model open-source gratis
+// (Llama, Qwen, DeepSeek, dll) lewat satu API key. Endpoint kompatibel
+// format OpenAI juga, strukturnya sama persis dengan callGrok/callGroq.
+// Model dipilih yang varian ":free" supaya benar-benar tidak ada biaya.
+async function callOpenRouter(prompt: string, messages: { role: string; content: string }[]) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENROUTER_API_KEY belum diatur di server.");
+  }
+
+  const chatMessages = [
+    ...(Array.isArray(messages) ? messages : []).map((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.content,
+    })),
+    { role: "user", content: prompt },
+  ];
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      // Header ini diminta OpenRouter untuk identifikasi aplikasi (opsional
+      // tapi disarankan mereka); boleh diganti sesuai domain produksi.
+      "HTTP-Referer": "https://waris-ai-superapp.netlify.app",
+      "X-Title": "Waris AI Superapp",
+    },
+    body: JSON.stringify({
+      model: "meta-llama/llama-3.3-70b-instruct:free",
+      messages: chatMessages,
+      temperature: 0.7,
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("OpenRouter API error:", errText);
+    throw new Error("Gagal menghubungi OpenRouter API.");
+  }
+
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content ?? "Maaf, tidak ada respons dari AI.";
+}
+
 // Daftar provider untuk fallback otomatis. Urutan menentukan prioritas: kalau
 // provider pertama gagal (limit habis, error server, key belum diatur, dll),
 // otomatis coba provider berikutnya sampai salah satu berhasil.
-type ProviderName = "gemini" | "groq" | "grok";
+type ProviderName = "gemini" | "groq" | "grok" | "openrouter";
 
 const FALLBACK_ORDER: { name: ProviderName; call: typeof callGemini; cost: number }[] = [
   { name: "gemini", call: callGemini, cost: 2.0 },
   { name: "groq", call: callGroq, cost: 1.5 },
+  { name: "openrouter", call: callOpenRouter, cost: 1.0 },
   { name: "grok", call: callGrok, cost: 3.0 },
 ];
 
@@ -208,6 +254,8 @@ export async function POST(req: Request) {
       "gpt-oss": "groq",
       grok: "grok",
       "grok-4.3": "grok",
+      openrouter: "openrouter",
+      llama: "openrouter",
     };
     const preferred: ProviderName | undefined = preferredMap[modelKey] ?? "gemini";
 
