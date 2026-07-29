@@ -124,6 +124,49 @@ async function callGroq(prompt: string, messages: { role: string; content: strin
   return data?.choices?.[0]?.message?.content ?? "Maaf, tidak ada respons dari AI.";
 }
 
+// Daftar provider untuk fallback otomatis. Urutan menentukan prioritas: kalau
+// provider pertama gagal (limit habis, error server, key belum diatur, dll),
+// otomatis coba provider berikutnya sampai salah satu berhasil.
+type ProviderName = "gemini" | "groq" | "grok";
+
+const FALLBACK_ORDER: { name: ProviderName; call: typeof callGemini; cost: number }[] = [
+  { name: "gemini", call: callGemini, cost: 2.0 },
+  { name: "groq", call: callGroq, cost: 1.5 },
+  { name: "grok", call: callGrok, cost: 3.0 },
+];
+
+async function callWithFallback(
+  preferred: ProviderName | undefined,
+  prompt: string,
+  messages: { role: string; content: string }[]
+) {
+  // Urutkan supaya provider yang diminta user (preferred) dicoba lebih dulu,
+  // baru sisanya sebagai cadangan, tanpa mengubah urutan default di atas.
+  const order = preferred
+    ? [
+        ...FALLBACK_ORDER.filter((p) => p.name === preferred),
+        ...FALLBACK_ORDER.filter((p) => p.name !== preferred),
+      ]
+    : FALLBACK_ORDER;
+
+  let lastError: unknown = null;
+
+  for (const provider of order) {
+    try {
+      const text = await provider.call(prompt, messages);
+      return { text, modelUsed: provider.name, cost: provider.cost };
+    } catch (err) {
+      console.error(`Provider ${provider.name} gagal, mencoba provider berikutnya:`, err);
+      lastError = err;
+      continue;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Semua provider AI gagal merespons.");
+}
+
 export async function POST(req: Request) {
   try {
     const token = cookies().get(AUTH_COOKIE_NAME)?.value;
@@ -154,50 +197,29 @@ export async function POST(req: Request) {
       );
     }
 
-    let aiResponseText = "";
-    let calculatedCost = 2.0; // Biaya default per hit token
+    // 2. Petakan pilihan model dari frontend ke nama provider internal.
+    // gpt-4o / claude-3-5-sonnet / deepseek-r1 masih dipetakan ke Gemini
+    // sampai API key masing-masing tersedia.
+    const modelKey = modelSelected?.toLowerCase();
+    const preferredMap: Record<string, ProviderName> = {
+      gemini: "gemini",
+      groq: "groq",
+      "groq-llama": "groq",
+      "gpt-oss": "groq",
+      grok: "grok",
+      "grok-4.3": "grok",
+    };
+    const preferred: ProviderName | undefined = preferredMap[modelKey] ?? "gemini";
 
-    // 2. Grok (xAI) dan Groq (GroqCloud) sudah aktif, masing-masing pakai
-    // env variable dan endpoint sendiri sehingga tidak saling tabrakan.
-    // Model lain (gpt-4o, claude-3-5-sonnet, deepseek-r1) masih diarahkan
-    // sementara ke Gemini sampai API key masing-masing tersedia.
-    switch (modelSelected?.toLowerCase()) {
-      case "grok":
-      case "grok-4.3":
-        aiResponseText = await callGrok(prompt, messages);
-        calculatedCost = 3.0;
-        break;
+    // 3. Panggil provider yang dipilih; kalau gagal, otomatis fallback
+    // ke provider lain sampai berhasil.
+    const { text: aiResponseText, modelUsed, cost: calculatedCost } = await callWithFallback(
+      preferred,
+      prompt,
+      messages
+    );
 
-      case "groq":
-      case "groq-llama":
-      case "gpt-oss":
-        aiResponseText = await callGroq(prompt, messages);
-        calculatedCost = 1.5;
-        break;
-
-      case "gpt-4o":
-        aiResponseText = await callGemini(prompt, messages);
-        calculatedCost = 5.0;
-        break;
-
-      case "claude-3-5-sonnet":
-        aiResponseText = await callGemini(prompt, messages);
-        calculatedCost = 6.0;
-        break;
-
-      case "deepseek-r1":
-        aiResponseText = await callGemini(prompt, messages);
-        calculatedCost = 1.0;
-        break;
-
-      case "gemini":
-      default:
-        aiResponseText = await callGemini(prompt, messages);
-        calculatedCost = 2.0;
-        break;
-    }
-
-    // 3. Potong Kredit dan Masukkan ke Riwayat Log Menggunakan Prisma Transaction
+    // 4. Potong Kredit dan Masukkan ke Riwayat Log Menggunakan Prisma Transaction
     await prisma.$transaction([
       prisma.user.update({
         where: { id: userId },
@@ -207,7 +229,7 @@ export async function POST(req: Request) {
         data: {
           userId,
           studioType: "CHAT",
-          modelUsed: modelSelected || "gemini",
+          modelUsed, // dicatat provider yang BENAR-BENAR dipakai (bisa beda dari yang diminta kalau ada fallback)
           promptInput: prompt || JSON.stringify(messages),
           outputData: aiResponseText,
           creditsUsed: calculatedCost,
@@ -218,6 +240,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       success: true,
       text: aiResponseText,
+      modelUsed,
       creditsRemaining: user.credits - calculatedCost,
     });
   } catch (error: any) {
