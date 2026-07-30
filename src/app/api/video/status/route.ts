@@ -1,9 +1,9 @@
-﻿// src/app/api/video/status/route.ts
+// src/app/api/video/status/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import { AUTH_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
-import { getVideoJobStatus } from "@/lib/video-provider";
+import { getGrokVideoTaskStatus } from "@/lib/video-provider";
 
 export async function GET(req: Request) {
   try {
@@ -20,10 +20,10 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "jobId wajib disertakan." }, { status: 400 });
     }
 
-    const result = await getVideoJobStatus(jobId);
+    const result = await getGrokVideoTaskStatus(jobId);
 
     if (result.status === "completed" && result.videoUrl) {
-      await prisma.aIHistoryLog.create({
+      await prisma.aiHistoryLog.create({
         data: {
           userId: session.userId,
           studioType: "VIDEO",
