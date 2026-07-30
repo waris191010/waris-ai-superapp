@@ -1,9 +1,9 @@
-﻿// src/app/api/video/generate/route.ts
+// src/app/api/video/generate/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import { AUTH_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
-import { createVideoJob } from "@/lib/video-provider";
+import { createGrokVideoTask } from "@/lib/video-provider";
 
 const VIDEO_GENERATION_COST = 50;
 
@@ -31,7 +31,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const job = await createVideoJob({
+    const job = await createGrokVideoTask({
       prompt: prompt.trim(),
       imageUrl: typeof imageUrl === "string" && imageUrl.trim() ? imageUrl.trim() : undefined,
       durationSeconds: typeof durationSeconds === "number" ? durationSeconds : 6,
@@ -42,7 +42,7 @@ export async function POST(req: Request) {
       data: { credits: { decrement: VIDEO_GENERATION_COST } },
     });
 
-    return NextResponse.json({ jobId: job.jobId, creditsCharged: VIDEO_GENERATION_COST });
+    return NextResponse.json({ jobId: job.taskId, creditsCharged: VIDEO_GENERATION_COST });
   } catch (error) {
     console.error("Video generate error:", error);
     const message = error instanceof Error ? error.message : "Terjadi kesalahan pada server.";
