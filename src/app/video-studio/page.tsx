@@ -246,6 +246,65 @@ export default function VideoStudioPage() {
     }
   };
 
+  const generateWithAI = async () => {
+    const combinedPrompt = scenes.map((s) => s.caption).filter(Boolean).join('. ');
+    const refImage = scenes.find((s) => s.imageUrl)?.imageUrl ?? null;
+
+    if (!combinedPrompt.trim()) {
+      setStatus('Isi caption minimal 1 scene dulu untuk jadi prompt AI.');
+      setStatusErr(true);
+      return;
+    }
+
+    setIsRendering(true);
+    setStatusErr(false);
+    setDownloadUrl(null);
+    setResultVideoUrl(null);
+    setStatus('Mengirim permintaan ke Grok Imagine Video...');
+
+    try {
+      const genRes = await fetch('/api/video/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: combinedPrompt,
+          imageUrl: refImage ?? undefined,
+          durationSeconds: Math.min(Math.max(Math.round(totalDuration), 1), 12),
+        }),
+      });
+      const genData = await genRes.json();
+      if (!genRes.ok) throw new Error(genData.error || 'Gagal memulai job AI.');
+
+      const jobId = genData.jobId;
+      setStatus('Video sedang diproses AI, mohon tunggu...');
+
+      let attempts = 0;
+      while (attempts < 60) {
+        await new Promise((r) => setTimeout(r, 5000));
+        const statusRes = await fetch(`/api/video/status?jobId=${jobId}&prompt=${encodeURIComponent(combinedPrompt)}`);
+        const statusData = await statusRes.json();
+        if (!statusRes.ok) throw new Error(statusData.error || 'Gagal cek status job.');
+
+        if (statusData.status === 'completed' && statusData.videoUrl) {
+          setResultVideoUrl(statusData.videoUrl);
+          setDownloadUrl(statusData.videoUrl);
+          setStatus('Selesai. Video AI siap ditonton/diunduh.');
+          return;
+        }
+        if (statusData.status === 'error') {
+          throw new Error(statusData.errorMessage || 'Job AI gagal diproses.');
+        }
+        attempts++;
+      }
+      throw new Error('Waktu tunggu habis, coba cek lagi nanti.');
+    } catch (err: any) {
+      setStatus('Gagal generate AI: ' + err.message);
+      setStatusErr(true);
+    } finally {
+      setIsRendering(false);
+    }
+  };
+
   return (
     <div style={{ background: 'var(--bg-void)', minHeight: '100vh', color: 'var(--text-cream)' }}>
       <style>{`
@@ -255,52 +314,51 @@ export default function VideoStudioPage() {
           --text-cream:#f3ede1; --text-muted:#b3a892; --border-line:#3a3226; --danger:#c1553d;
         }
         .vs-wrap{max-width:1180px;margin:0 auto;padding:28px 20px 80px;font-family:'Inter',sans-serif;}
-        .vs-header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:24px;flex-wrap:wrap;border-bottom:1px solid var(--border-line);padding-bottom:18px;}
+        .vs-header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:24px;flex-wrap:wrap;}
         .vs-brand{display:flex;align-items:center;gap:12px;}
         .vs-dot{width:12px;height:12px;border-radius:50%;background:var(--accent-amber);box-shadow:0 0 10px var(--accent-amber);}
         .vs-brand h1{font-family:'Space Grotesk',sans-serif;font-size:22px;margin:0;}
-        .vs-tag{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-muted);letter-spacing:1.5px;text-transform:uppercase;margin-top:2px;}
-        .vs-counter{font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);border:1px solid var(--border-line);padding:6px 12px;border-radius:4px;background:var(--bg-panel);}
+        .vs-tag{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-muted);letter-spacing:1.5px;text-transform:uppercase;}
+        .vs-counter{font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);border:1px solid var(--border-line);padding:6px 12px;border-radius:6px;}
         .vs-counter b{color:var(--text-cream);}
         .vs-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;}
         @media (max-width:920px){.vs-grid{grid-template-columns:1fr;}}
         .vs-reel{position:relative;padding-left:22px;}
-        .vs-reel::before{content:"";position:absolute;left:0;top:0;bottom:0;width:14px;background-image:radial-gradient(circle, var(--bg-void) 3px, transparent 3.5px);background-size:14px 22px;background-color:var(--bg-panel-3);border-radius:3px;}
-        .vs-section-title{font-family:'Space Grotesk',sans-serif;font-size:14px;text-transform:uppercase;letter-spacing:1.5px;color:var(--accent-amber);margin:0 0 14px;}
-        .vs-scene-card{background:var(--bg-panel);border:1px solid var(--border-line);border-radius:8px;padding:14px;margin-bottom:14px;position:relative;}
+        .vs-section-title{font-family:'Space Grotesk',sans-serif;font-size:14px;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;color:var(--text-muted);}
+        .vs-scene-card{background:var(--bg-panel);border:1px solid var(--border-line);border-radius:8px;padding:14px;margin-bottom:12px;}
         .vs-scene-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
         .vs-scene-num{font-family:'IBM Plex Mono',monospace;color:var(--accent-amber);font-size:13px;}
-        .vs-scene-remove{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:2px 6px;}
+        .vs-scene-remove{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:2px;}
         .vs-scene-remove:hover{color:var(--danger);}
         .vs-scene-body{display:grid;grid-template-columns:96px 1fr;gap:12px;}
-        .vs-thumb{width:96px;height:96px;border-radius:6px;background:var(--bg-panel-2);border:1px dashed var(--border-line);display:flex;align-items:center;justify-content:center;background-size:cover;background-position:center;cursor:pointer;overflow:hidden;flex-shrink:0;font-size:11px;color:var(--text-muted);text-align:center;padding:4px;}
+        .vs-thumb{width:96px;height:96px;border-radius:6px;background:var(--bg-panel-2);border:1px dashed var(--border-line);background-size:cover;background-position:center;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text-muted);text-align:center;}
         .vs-thumb:hover{border-color:var(--accent-amber);}
-        .vs-cap{width:100%;min-height:56px;resize:vertical;background:var(--bg-panel-2);border:1px solid var(--border-line);border-radius:6px;color:var(--text-cream);font-family:'Inter',sans-serif;font-size:13px;padding:8px 10px;}
+        .vs-cap{width:100%;min-height:56px;resize:vertical;background:var(--bg-panel-2);border:1px solid var(--border-line);border-radius:6px;color:var(--text-cream);padding:8px;font-family:'Inter',sans-serif;font-size:13px;}
         .vs-cap:focus{outline:none;border-color:var(--accent-amber);}
         .vs-row-controls{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;}
-        .vs-mini-btn{font-family:'IBM Plex Mono',monospace;font-size:11px;background:var(--bg-panel-2);border:1px solid var(--border-line);color:var(--text-cream);padding:6px 10px;border-radius:5px;cursor:pointer;}
+        .vs-mini-btn{font-family:'IBM Plex Mono',monospace;font-size:11px;background:var(--bg-panel-2);border:1px solid var(--border-line);color:var(--text-cream);padding:6px 10px;border-radius:6px;cursor:pointer;}
         .vs-mini-btn:hover{border-color:var(--accent-amber);}
         .vs-mini-btn.rec-active{background:var(--danger);border-color:var(--danger);color:#fff;}
         .vs-mini-btn.has-audio{border-color:var(--accent-teal);color:var(--accent-teal);}
         .vs-dur-slider{display:flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-muted);}
         .vs-dur-slider input{width:80px;accent-color:var(--accent-amber);}
-        .vs-add-scene{width:100%;padding:12px;border:1px dashed var(--border-line);border-radius:8px;background:transparent;color:var(--text-muted);font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:0.5px;cursor:pointer;text-transform:uppercase;}
+        .vs-add-scene{width:100%;padding:12px;border:1px dashed var(--border-line);border-radius:8px;background:transparent;color:var(--text-muted);cursor:pointer;font-family:'Inter',sans-serif;}
         .vs-add-scene:hover{border-color:var(--accent-amber);color:var(--accent-amber);}
         .vs-preview-panel{position:sticky;top:20px;align-self:start;}
         .vs-screen{background:#000;border-radius:10px;overflow:hidden;position:relative;border:1px solid var(--border-line);}
         .vs-screen canvas, .vs-screen video{width:100%;display:block;aspect-ratio:16/9;background:#000;}
-        .vs-timecode{position:absolute;bottom:10px;right:10px;font-family:'IBM Plex Mono',monospace;font-size:11px;background:rgba(0,0,0,0.55);padding:4px 8px;border-radius:4px;}
+        .vs-timecode{position:absolute;bottom:10px;right:10px;font-family:'IBM Plex Mono',monospace;font-size:11px;background:rgba(0,0,0,0.6);color:var(--text-cream);padding:4px 8px;border-radius:4px;}
         .vs-controls-bar{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap;}
-        .vs-btn-primary{flex:1;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:14px;background:var(--accent-amber);color:#221806;border:none;border-radius:7px;padding:13px 18px;cursor:pointer;}
+        .vs-btn-primary{flex:1;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:14px;background:var(--accent-amber);border:none;border-radius:8px;color:#15130f;padding:12px;cursor:pointer;}
         .vs-btn-primary:hover{background:#f2b356;}
         .vs-btn-primary:disabled{background:var(--accent-amber-dim);color:#4a3c22;cursor:not-allowed;}
-        .vs-btn-secondary{font-family:'IBM Plex Mono',monospace;font-size:12px;background:transparent;color:var(--text-muted);border:1px solid var(--border-line);border-radius:7px;padding:13px 16px;cursor:pointer;}
+        .vs-btn-secondary{font-family:'IBM Plex Mono',monospace;font-size:12px;background:transparent;color:var(--text-cream);border:1px solid var(--border-line);border-radius:8px;padding:12px 16px;cursor:pointer;}
         .vs-btn-secondary:hover{border-color:var(--accent-teal);color:var(--accent-teal);}
         .vs-status-line{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text-muted);margin-top:12px;min-height:16px;}
         .vs-status-line.err{color:var(--danger);}
-        .vs-download-box{margin-top:16px;padding:14px;background:var(--bg-panel);border:1px solid var(--accent-teal);border-radius:8px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
-        .vs-download-box a{font-family:'Space Grotesk',sans-serif;font-weight:600;color:var(--accent-teal);text-decoration:none;font-size:13px;background:rgba(74,138,128,0.15);padding:9px 14px;border-radius:6px;}
-        .vs-note{font-family:'Inter',sans-serif;font-size:12px;color:var(--text-muted);line-height:1.6;margin-top:16px;padding:12px 14px;background:var(--bg-panel);border-radius:8px;border:1px solid var(--border-line);}
+        .vs-download-box{margin-top:16px;padding:14px;background:var(--bg-panel);border:1px solid var(--accent-teal);border-radius:8px;}
+        .vs-download-box a{font-family:'Space Grotesk',sans-serif;font-weight:600;color:var(--accent-teal);text-decoration:none;}
+        .vs-note{font-family:'Inter',sans-serif;font-size:12px;color:var(--text-muted);line-height:1.6;margin-top:16px;}
         .vs-note b{color:var(--text-cream);}
       `}</style>
 
@@ -310,7 +368,7 @@ export default function VideoStudioPage() {
             <div className="vs-dot" />
             <div>
               <h1>Video Studio</h1>
-              <div className="vs-tag">Narasi · Gambar · Caption &rarr; Video · Gratis di Browser</div>
+              <div className="vs-tag">Narasi &middot; Gambar &middot; Caption &rarr; Video &middot; Gratis di Browser</div>
             </div>
           </div>
           <div className="vs-counter">
@@ -326,7 +384,7 @@ export default function VideoStudioPage() {
                 <div className="vs-scene-card" key={scene.id}>
                   <div className="vs-scene-head">
                     <span className="vs-scene-num">SCENE {String(idx + 1).padStart(2, '0')}</span>
-                    <button className="vs-scene-remove" onClick={() => removeScene(scene.id)}>✕</button>
+                    <button className="vs-scene-remove" onClick={() => removeScene(scene.id)}>X</button>
                   </div>
                   <div className="vs-scene-body">
                     <div
@@ -349,7 +407,7 @@ export default function VideoStudioPage() {
                           onClick={() => toggleRecord(scene.id)}
                         >
                           {recordingSceneId === scene.id
-                            ? '⏺ Rekam... (klik utk stop)'
+                            ? '● Rekam... (klik utk stop)'
                             : scene.audioBlob
                               ? `✓ Suara (${scene.audioDuration.toFixed(1)}s)`
                               : '🎤 Rekam Suara'}
@@ -379,8 +437,8 @@ export default function VideoStudioPage() {
                   />
                 </div>
               ))}
+              <button className="vs-add-scene" onClick={addScene}>+ Tambah Scene</button>
             </div>
-            <button className="vs-add-scene" onClick={addScene}>+ Tambah Scene</button>
           </div>
 
           <div className="vs-preview-panel">
@@ -395,17 +453,18 @@ export default function VideoStudioPage() {
             </div>
             <div className="vs-controls-bar">
               <button className="vs-btn-primary" disabled={isRendering} onClick={renderVideo}>▶ Render Video</button>
+              <button className="vs-btn-primary" disabled={isRendering} onClick={generateWithAI}>✨ Generate dengan AI</button>
               <button className="vs-btn-secondary" onClick={() => window.location.reload()}>Reset</button>
             </div>
             <div className={`vs-status-line ${statusErr ? 'err' : ''}`}>{status}</div>
             {downloadUrl && (
               <div className="vs-download-box">
-                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: 'var(--text-muted)' }}>Video siap ✓</span>
+                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: 'var(--text-muted)' }}>Video: </span>
                 <a href={downloadUrl} download="video-studio-export.webm">Unduh Video</a>
               </div>
             )}
             <div className="vs-note">
-              <b>Cara narasi:</b> tiap scene punya tombol <b>🎤 Rekam Suara</b> (mic Anda sendiri) dan <b>🔊 Coba Baca</b> (Text-to-Speech browser, hanya pratinjau — tidak bisa direkam langsung ke video karena batasan browser). Tanpa rekaman suara, durasi scene pakai slider manual dan bagian itu senyap.
+              <b>Cara narasi:</b> tiap scene punya tombol <b>🎤 Rekam Suara</b> (mic Anda sendiri) dan <b>🔊 Coba Baca</b>.
             </div>
           </div>
         </div>
