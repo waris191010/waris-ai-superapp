@@ -27,44 +27,86 @@ export interface VideoJobStatus {
   errorMessage?: string;
 }
 
+interface ProviderAttempt {
+  name: string;
+  model: string;
+  body: Record<string, unknown>;
+}
+
+function buildAttempts(input: CreateVideoJobInput): ProviderAttempt[] {
+  const duration = input.durationSeconds ?? 6;
+
+  return [
+    {
+      name: "Grok Imagine",
+      model: input.imageUrl
+        ? "grok-imagine/image-to-video"
+        : "grok-imagine/text-to-video",
+      body: {
+        prompt: input.prompt,
+        ...(input.imageUrl ? { image_url: input.imageUrl } : {}),
+        duration: String(duration),
+      },
+    },
+    {
+      name: "Bytedance Seedance 2.0 Fast",
+      model: "bytedance/seedance-2-fast",
+      body: {
+        prompt: input.prompt,
+        ...(input.imageUrl ? { first_frame_url: input.imageUrl } : {}),
+        resolution: "720p",
+        aspect_ratio: "16:9",
+        duration,
+        generate_audio: false,
+      },
+    },
+  ];
+}
+
 export async function createVideoJob(
   input: CreateVideoJobInput
 ): Promise<CreateVideoJobResult> {
-  // Pakai Grok Imagine: text-to-video kalau tidak ada gambar,
-  // image-to-video kalau ada imageUrl.
-  const model = input.imageUrl
-    ? "grok-imagine/image-to-video"
-    : "grok-imagine/text-to-video";
+  const attempts = buildAttempts(input);
+  const errors: string[] = [];
 
-  const res = await fetch(`${KIE_BASE_URL}/createTask`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${getApiKey()}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      input: {
-        prompt: input.prompt,
-        ...(input.imageUrl ? { image_url: input.imageUrl } : {}),
-        duration: String(input.durationSeconds ?? 6),
-      },
-    }),
-  });
+  for (const attempt of attempts) {
+    try {
+      const res = await fetch(`${KIE_BASE_URL}/createTask`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${getApiKey()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: attempt.model,
+          input: attempt.body,
+        }),
+      });
 
-  if (!res.ok) {
-    const errorText = await res.text().catch(() => "");
-    throw new Error(
-      `Gagal membuat permintaan video ke provider (status ${res.status}). ${errorText}`
-    );
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => "");
+        errors.push(`${attempt.name} (status ${res.status}): ${errorText}`);
+        continue;
+      }
+
+      const data = await res.json();
+      const jobId = data?.data?.taskId;
+      if (!jobId) {
+        errors.push(`${attempt.name}: tidak mengembalikan ID tugas.`);
+        continue;
+      }
+
+      return { jobId };
+    } catch (err) {
+      errors.push(
+        `${attempt.name}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 
-  const data = await res.json();
-  const jobId = data?.data?.taskId;
-  if (!jobId) {
-    throw new Error("Provider tidak mengembalikan ID tugas video.");
-  }
-  return { jobId };
+  throw new Error(
+    `Semua provider video gagal.\n${errors.join("\n")}`
+  );
 }
 
 export async function getVideoJobStatus(
