@@ -23,8 +23,8 @@ export async function GET(req: Request) {
     const result = await getGrokVideoTaskStatus(jobId);
 
     if (result.status === "completed" && result.videoUrl) {
-      await prisma.aiHistoryLog.create({
-        data: {
+await prisma.aIHistoryLog.create({
+data: {
           userId: session.userId,
           studioType: "VIDEO",
           modelUsed: "grok-imagine-video",
