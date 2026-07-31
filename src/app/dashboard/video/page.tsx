@@ -241,6 +241,8 @@ export default function VideoStudioPage() {
     setStatus('Menyiapkan recorder...');
 
     try {
+      const hasAnyAudio = validScenes.some((s) => !!s.audioBlob);
+
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const audioCtx = new AudioContextClass();
       if (audioCtx.state === 'suspended') {
@@ -248,13 +250,22 @@ export default function VideoStudioPage() {
       }
       const destination = audioCtx.createMediaStreamDestination();
       const canvasStream = canvas.captureStream(30);
-      const combined = new MediaStream([
-        ...canvasStream.getVideoTracks(),
-        ...destination.stream.getAudioTracks(),
-      ]);
 
-      if (combined.getVideoTracks().length === 0) {
+      // kalau tidak ada scene yang pakai rekaman suara, rekam video-only saja
+      // (menghindari kemungkinan bug muxing audio+video di beberapa browser)
+      const combined = hasAnyAudio
+        ? new MediaStream([
+            ...canvasStream.getVideoTracks(),
+            ...destination.stream.getAudioTracks(),
+          ])
+        : new MediaStream([...canvasStream.getVideoTracks()]);
+
+      const videoTrack = combined.getVideoTracks()[0];
+      if (!videoTrack) {
         throw new Error('Browser tidak bisa merekam canvas (video track kosong). Coba pakai Chrome/Edge terbaru.');
+      }
+      if (videoTrack.readyState !== 'live') {
+        throw new Error(`Video track browser berstatus "${videoTrack.readyState}" (harusnya "live"). Coba muat ulang halaman lalu render lagi.`);
       }
 
       const candidateMimeTypes = [
@@ -301,7 +312,7 @@ export default function VideoStudioPage() {
       const totalBytes = chunks.reduce((a, c) => a + (c as Blob).size, 0);
       if (totalBytes < 2000) {
         throw new Error(
-          `Rekaman gagal (hanya ${totalBytes} byte data terekam). Coba lagi tanpa pindah tab/aplikasi selama proses render, atau pakai browser Chrome/Edge versi terbaru.`
+          `Rekaman gagal (${totalBytes} byte, ${chunks.length} chunk, mimeType="${mimeType || 'default'}", audio=${hasAnyAudio}). Coba render ulang, atau kirim info ini ke developer.`
         );
       }
 
