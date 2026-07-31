@@ -11,6 +11,9 @@ interface Scene {
   audioUrl: string | null;
   audioDuration: number;
   kbDirection: 1 | -1;
+  imagePrompt: string;
+  imageProvider: 'pollinations' | 'gemini';
+  isGeneratingImage: boolean;
 }
 
 let sceneIdSeq = 1;
@@ -73,7 +76,11 @@ function drawCaption(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, t
 
 export default function VideoStudioPage() {
   const [scenes, setScenes] = useState<Scene[]>([
-    { id: sceneIdSeq++, imageUrl: null, caption: '', manualDuration: 4, audioBlob: null, audioUrl: null, audioDuration: 0, kbDirection: 1 },
+    {
+      id: sceneIdSeq++, imageUrl: null, caption: '', manualDuration: 4,
+      audioBlob: null, audioUrl: null, audioDuration: 0, kbDirection: 1,
+      imagePrompt: '', imageProvider: 'pollinations', isGeneratingImage: false,
+    },
   ]);
   const [isRendering, setIsRendering] = useState(false);
   const [status, setStatus] = useState('Tambahkan scene untuk mulai.');
@@ -95,6 +102,7 @@ export default function VideoStudioPage() {
       id: sceneIdSeq++, imageUrl: null, caption: '', manualDuration: 4,
       audioBlob: null, audioUrl: null, audioDuration: 0,
       kbDirection: Math.random() > 0.5 ? 1 : -1,
+      imagePrompt: '', imageProvider: 'pollinations', isGeneratingImage: false,
     }]);
   };
 
@@ -108,6 +116,36 @@ export default function VideoStudioPage() {
     const reader = new FileReader();
     reader.onload = (ev) => updateScene(id, { imageUrl: ev.target?.result as string });
     reader.readAsDataURL(file);
+  };
+
+  const generateSceneImage = async (id: number) => {
+    const scene = scenes.find((s) => s.id === id);
+    if (!scene) return;
+    const prompt = scene.imagePrompt.trim() || scene.caption.trim();
+    if (!prompt) {
+      setStatus('Isi prompt gambar (atau caption) dulu sebelum generate AI.');
+      setStatusErr(true);
+      return;
+    }
+    updateScene(id, { isGeneratingImage: true });
+    setStatusErr(false);
+    setStatus('Menghasilkan gambar AI untuk scene ini...');
+    try {
+      const res = await fetch('/api/image/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, provider: scene.imageProvider }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Gagal generate gambar AI.');
+      updateScene(id, { imageUrl: data.imageUrl });
+      setStatus('Gambar AI berhasil dibuat untuk scene ini.');
+    } catch (err: any) {
+      setStatus('Gagal generate gambar AI: ' + err.message);
+      setStatusErr(true);
+    } finally {
+      updateScene(id, { isGeneratingImage: false });
+    }
   };
 
   const speakCaption = (text: string) => {
@@ -302,6 +340,15 @@ export default function VideoStudioPage() {
         .vs-download-box a{font-family:'Space Grotesk',sans-serif;font-weight:600;color:var(--accent-teal);text-decoration:none;font-size:13px;background:rgba(74,138,128,0.15);padding:9px 14px;border-radius:6px;}
         .vs-note{font-family:'Inter',sans-serif;font-size:12px;color:var(--text-muted);line-height:1.6;margin-top:16px;padding:12px 14px;background:var(--bg-panel);border-radius:8px;border:1px solid var(--border-line);}
         .vs-note b{color:var(--text-cream);}
+        .vs-ai-box{margin-top:10px;padding:10px;background:var(--bg-panel-2);border:1px solid var(--border-line);border-radius:6px;}
+        .vs-ai-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;}
+        .vs-ai-input{flex:1;min-width:140px;background:var(--bg-panel);border:1px solid var(--border-line);border-radius:5px;color:var(--text-cream);font-family:'Inter',sans-serif;font-size:12px;padding:7px 9px;}
+        .vs-ai-input:focus{outline:none;border-color:var(--accent-teal);}
+        .vs-ai-select{background:var(--bg-panel);border:1px solid var(--border-line);border-radius:5px;color:var(--text-cream);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:7px 6px;}
+        .vs-ai-btn{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:12px;background:var(--accent-teal);color:#0f1e1b;border:none;border-radius:5px;padding:8px 12px;cursor:pointer;white-space:nowrap;}
+        .vs-ai-btn:hover{background:#5da296;}
+        .vs-ai-btn:disabled{background:#2f4b46;color:#7d9b95;cursor:not-allowed;}
+        .vs-ai-label{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;}
       `}</style>
 
       <div className="vs-wrap">
@@ -334,7 +381,7 @@ export default function VideoStudioPage() {
                       style={scene.imageUrl ? { backgroundImage: `url(${scene.imageUrl})` } : {}}
                       onClick={() => fileInputRefs.current[scene.id]?.click()}
                     >
-                      {!scene.imageUrl && '+ Gambar'}
+                      {scene.isGeneratingImage ? '⏳ ...' : (!scene.imageUrl && '+ Gambar')}
                     </div>
                     <div style={{ minWidth: 0 }}>
                       <textarea
@@ -372,6 +419,35 @@ export default function VideoStudioPage() {
                       </div>
                     </div>
                   </div>
+
+                  <div className="vs-ai-box">
+                    <span className="vs-ai-label">✨ Generate Gambar AI</span>
+                    <div className="vs-ai-row">
+                      <input
+                        className="vs-ai-input"
+                        type="text"
+                        placeholder="Prompt gambar (kosongkan utk pakai caption)"
+                        value={scene.imagePrompt}
+                        onChange={(e) => updateScene(scene.id, { imagePrompt: e.target.value })}
+                      />
+                      <select
+                        className="vs-ai-select"
+                        value={scene.imageProvider}
+                        onChange={(e) => updateScene(scene.id, { imageProvider: e.target.value as Scene['imageProvider'] })}
+                      >
+                        <option value="pollinations">Pollinations (Gratis)</option>
+                        <option value="gemini">Gemini</option>
+                      </select>
+                      <button
+                        className="vs-ai-btn"
+                        disabled={scene.isGeneratingImage}
+                        onClick={() => generateSceneImage(scene.id)}
+                      >
+                        {scene.isGeneratingImage ? 'Membuat...' : '✨ Generate Gambar AI'}
+                      </button>
+                    </div>
+                  </div>
+
                   <input
                     type="file" accept="image/*" style={{ display: 'none' }}
                     ref={(el) => { fileInputRefs.current[scene.id] = el; }}
@@ -406,6 +482,8 @@ export default function VideoStudioPage() {
             )}
             <div className="vs-note">
               <b>Cara narasi:</b> tiap scene punya tombol <b>🎤 Rekam Suara</b> (mic Anda sendiri) dan <b>🔊 Coba Baca</b> (Text-to-Speech browser, hanya pratinjau — tidak bisa direkam langsung ke video karena batasan browser). Tanpa rekaman suara, durasi scene pakai slider manual dan bagian itu senyap.
+              <br /><br />
+              <b>Generate Gambar AI:</b> isi prompt (atau kosongkan untuk memakai caption scene), pilih provider, lalu klik tombol. Pollinations gratis tanpa API key; Gemini butuh <code>GEMINI_API_KEY</code> di Environment Variables.
             </div>
           </div>
         </div>
