@@ -1,4 +1,3 @@
-// src/lib/video-provider.ts
 const KIE_BASE_URL = "https://api.kie.ai/api/v1/jobs";
 
 function getApiKey(): string {
@@ -68,9 +67,24 @@ export async function getGrokVideoTaskStatus(taskId: string): Promise<VideoJobSt
 
   const data = await response.json();
 
+  if (!data || data.code !== 200 || !data.data) {
+    return {
+      status: "error",
+      errorMessage: (data && (data.msg || data.message)) || `Respons tidak valid dari kie.ai (kode: ${data?.code}).`,
+    };
+  }
+
+  const taskData = data.data;
+  const rawStatus = String(taskData.status || taskData.state || "").toLowerCase();
+
+  let status: VideoJobStatus["status"] = "generating";
+  if (rawStatus.includes("complete") || rawStatus.includes("success")) status = "completed";
+  else if (rawStatus.includes("fail") || rawStatus.includes("error")) status = "error";
+  else if (rawStatus.includes("queue") || rawStatus.includes("wait")) status = "queued";
+
   return {
-    status: data.data.status,
-    videoUrl: data.data.videoUrl,
-    errorMessage: data.data.errorMessage,
+    status,
+    videoUrl: taskData.videoUrl || taskData.resultUrl || taskData.outputUrl,
+    errorMessage: taskData.errorMessage || taskData.failMsg || taskData.msg,
   };
 }
