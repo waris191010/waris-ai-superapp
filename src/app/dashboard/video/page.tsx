@@ -14,6 +14,7 @@ interface Scene {
   imagePrompt: string;
   imageProvider: 'pollinations' | 'gemini';
   isGeneratingImage: boolean;
+  isGeneratingVoice: boolean;
 }
 
 let sceneIdSeq = 1;
@@ -80,6 +81,7 @@ export default function VideoStudioPage() {
       id: sceneIdSeq++, imageUrl: null, caption: '', manualDuration: 4,
       audioBlob: null, audioUrl: null, audioDuration: 0, kbDirection: 1,
       imagePrompt: '', imageProvider: 'pollinations', isGeneratingImage: false,
+      isGeneratingVoice: false,
     },
   ]);
   const [isRendering, setIsRendering] = useState(false);
@@ -103,6 +105,7 @@ export default function VideoStudioPage() {
       audioBlob: null, audioUrl: null, audioDuration: 0,
       kbDirection: Math.random() > 0.5 ? 1 : -1,
       imagePrompt: '', imageProvider: 'pollinations', isGeneratingImage: false,
+      isGeneratingVoice: false,
     }]);
   };
 
@@ -154,6 +157,47 @@ export default function VideoStudioPage() {
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = 'id-ID';
     window.speechSynthesis.speak(utter);
+  };
+
+  const generateSceneVoice = async (id: number) => {
+    const scene = scenes.find((s) => s.id === id);
+    if (!scene) return;
+    const text = scene.caption.trim();
+    if (!text) {
+      setStatus('Isi caption dulu sebelum generate suara AI.');
+      setStatusErr(true);
+      return;
+    }
+    updateScene(id, { isGeneratingVoice: true });
+    setStatusErr(false);
+    setStatus('Menghasilkan suara AI (wanita)...');
+    try {
+      const res = await fetch('/api/audio/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, lang: 'id' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Gagal generate suara AI.');
+
+      const audioRes = await fetch(data.audioUrl);
+      const blob = await audioRes.blob();
+      const url = URL.createObjectURL(blob);
+      const tempAudio = new Audio(url);
+      await new Promise<void>((resolve, reject) => {
+        tempAudio.onloadedmetadata = () => {
+          updateScene(id, { audioBlob: blob, audioUrl: url, audioDuration: tempAudio.duration });
+          resolve();
+        };
+        tempAudio.onerror = () => reject(new Error('Audio hasil AI gagal dimuat.'));
+      });
+      setStatus('Suara AI berhasil dibuat untuk scene ini.');
+    } catch (err: any) {
+      setStatus('Gagal generate suara AI: ' + err.message);
+      setStatusErr(true);
+    } finally {
+      updateScene(id, { isGeneratingVoice: false });
+    }
   };
 
   const toggleRecord = async (id: number) => {
@@ -447,6 +491,13 @@ export default function VideoStudioPage() {
                               : '🎤 Rekam Suara'}
                         </button>
                         <button className="vs-mini-btn" onClick={() => speakCaption(scene.caption)}>🔊 Coba Baca</button>
+                        <button
+                          className="vs-mini-btn"
+                          disabled={scene.isGeneratingVoice}
+                          onClick={() => generateSceneVoice(scene.id)}
+                        >
+                          {scene.isGeneratingVoice ? '⏳ Membuat suara...' : '🗣️ Generate Suara AI'}
+                        </button>
                         {scene.audioBlob && (
                           <button className="vs-mini-btn" onClick={() => clearAudio(scene.id)}>Hapus Suara</button>
                         )}
@@ -526,7 +577,7 @@ export default function VideoStudioPage() {
               </div>
             )}
             <div className="vs-note">
-              <b>Cara narasi:</b> tiap scene punya tombol <b>🎤 Rekam Suara</b> (mic Anda sendiri) dan <b>🔊 Coba Baca</b> (Text-to-Speech browser, hanya pratinjau — tidak bisa direkam langsung ke video karena batasan browser). Tanpa rekaman suara, durasi scene pakai slider manual dan bagian itu senyap.
+              <b>Cara narasi:</b> tiap scene punya tombol <b>🎤 Rekam Suara</b> (mic Anda sendiri), <b>🔊 Coba Baca</b> (Text-to-Speech browser, hanya pratinjau — tidak ikut ke video), dan <b>🗣️ Generate Suara AI</b> (suara wanita hasil AI, otomatis ikut ke video hasil render, dari isi caption scene). Tanpa suara sama sekali, durasi scene pakai slider manual dan bagian itu senyap.
               <br /><br />
               <b>Generate Gambar AI:</b> isi prompt (atau kosongkan untuk memakai caption scene), pilih provider, lalu klik tombol. Pollinations gratis tanpa API key; Gemini butuh <code>GEMINI_API_KEY</code> di Environment Variables.
             </div>
