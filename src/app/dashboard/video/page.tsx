@@ -243,26 +243,46 @@ export default function VideoStudioPage() {
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const audioCtx = new AudioContextClass();
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
       const destination = audioCtx.createMediaStreamDestination();
       const canvasStream = canvas.captureStream(30);
       const combined = new MediaStream([
         ...canvasStream.getVideoTracks(),
         ...destination.stream.getAudioTracks(),
       ]);
-      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
-        ? 'video/webm;codecs=vp9,opus' : 'video/webm';
-      const recorder = new MediaRecorder(combined, { mimeType });
+
+      if (combined.getVideoTracks().length === 0) {
+        throw new Error('Browser tidak bisa merekam canvas (video track kosong). Coba pakai Chrome/Edge terbaru.');
+      }
+
+      const candidateMimeTypes = [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+      ];
+      const mimeType = candidateMimeTypes.find((m) => MediaRecorder.isTypeSupported(m)) || '';
+      const recorder = mimeType
+        ? new MediaRecorder(combined, { mimeType })
+        : new MediaRecorder(combined);
+
       const chunks: BlobPart[] = [];
-      recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
 
       const total = validScenes.reduce((a, s) => a + (s.audioBlob ? s.audioDuration : s.manualDuration), 0);
       let elapsedBefore = 0;
 
-      const stopped = new Promise<Blob>((resolve) => {
-        recorder.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' }));
+      const stopped = new Promise<void>((resolve) => {
+        recorder.onstop = () => resolve();
       });
 
-      recorder.start();
+      // timeslice 250ms supaya data mengalir berkala, bukan cuma 1x di akhir
+      recorder.start(250);
+
+      // beri jeda singkat supaya recorder benar-benar aktif sebelum canvas mulai digambar
+      await new Promise((r) => setTimeout(r, 150));
+
       setStatus('Merender video...');
 
       for (const scene of validScenes) {
@@ -270,12 +290,26 @@ export default function VideoStudioPage() {
         elapsedBefore += scene.audioBlob ? scene.audioDuration : scene.manualDuration;
       }
 
+      // minta chunk terakhir sebelum stop, lalu beri jeda supaya event sempat diproses
+      if (recorder.state === 'recording') {
+        recorder.requestData();
+      }
+      await new Promise((r) => setTimeout(r, 200));
       recorder.stop();
-      const blob = await stopped;
+      await stopped;
+
+      const totalBytes = chunks.reduce((a, c) => a + (c as Blob).size, 0);
+      if (totalBytes < 2000) {
+        throw new Error(
+          `Rekaman gagal (hanya ${totalBytes} byte data terekam). Coba lagi tanpa pindah tab/aplikasi selama proses render, atau pakai browser Chrome/Edge versi terbaru.`
+        );
+      }
+
+      const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
       const url = URL.createObjectURL(blob);
       setResultVideoUrl(url);
       setDownloadUrl(url);
-      setStatus('Selesai. Video siap diunduh (format WebM).');
+      setStatus(`Selesai. Video siap diunduh (${(totalBytes / 1024).toFixed(0)} KB, format WebM).`);
     } catch (err: any) {
       setStatus('Gagal render: ' + err.message);
       setStatusErr(true);
