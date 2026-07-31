@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import { AUTH_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import { createGrokVideoTask } from "@/lib/video-provider";
-
+export const maxDuration = 60;
 const VIDEO_GENERATION_COST = 50;
 
 export async function POST(req: Request) {
