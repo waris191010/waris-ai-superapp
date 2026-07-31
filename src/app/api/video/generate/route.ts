@@ -1,11 +1,37 @@
 // src/app/api/video/generate/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { put } from "@vercel/blob";
 import { prisma } from "@/lib/prisma";
 import { AUTH_COOKIE_NAME, verifySessionToken } from "@/lib/auth";
 import { createGrokVideoTask } from "@/lib/video-provider";
+
 export const maxDuration = 60;
+
 const VIDEO_GENERATION_COST = 50;
+
+async function resolveImageUrl(rawImageUrl: unknown): Promise<string | undefined> {
+  if (typeof rawImageUrl !== "string" || !rawImageUrl.trim()) return undefined;
+  const value = rawImageUrl.trim();
+
+  if (value.startsWith("data:")) {
+    const match = value.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+    if (!match) {
+      throw new Error("Format gambar tidak dikenali.");
+    }
+    const mimeType = match[1];
+    const base64Data = match[2];
+    const buffer = Buffer.from(base64Data, "base64");
+    const ext = mimeType.split("/")[1] || "png";
+    const blob = await put(`video-refs/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`, buffer, {
+      access: "public",
+      contentType: mimeType,
+    });
+    return blob.url;
+  }
+
+  return value;
+}
 
 export async function POST(req: Request) {
   try {
@@ -31,9 +57,11 @@ export async function POST(req: Request) {
       );
     }
 
+    const resolvedImageUrl = await resolveImageUrl(imageUrl);
+
     const job = await createGrokVideoTask({
       prompt: prompt.trim(),
-      imageUrl: typeof imageUrl === "string" && imageUrl.trim() ? imageUrl.trim() : undefined,
+      imageUrl: resolvedImageUrl,
       durationSeconds: typeof durationSeconds === "number" ? durationSeconds : 6,
     });
 
