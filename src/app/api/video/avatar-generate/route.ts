@@ -44,6 +44,17 @@ async function ensurePublicImageUrl(image: string): Promise<string> {
     method: "POST",
     headers: {
       Authorization: getDidAuthHeader(),
+},
+    body: formData,
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      data?.description || data?.message || `Gagal upload gambar ke D-ID (status ${res.status}).`
+    );
+  }
+  return data.url as string;
 }
 
 async function createTalk(sourceUrl: string, script: string, voiceId: string) {
