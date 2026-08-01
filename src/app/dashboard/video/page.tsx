@@ -15,6 +15,9 @@ interface Scene {
   imageProvider: 'pollinations' | 'gemini';
   isGeneratingImage: boolean;
   isGeneratingVoice: boolean;
+  avatarScript: string;
+  avatarVideoUrl: string | null;
+  isGeneratingAvatar: boolean;
 }
 
 let sceneIdSeq = 1;
@@ -82,6 +85,7 @@ export default function VideoStudioPage() {
       audioBlob: null, audioUrl: null, audioDuration: 0, kbDirection: 1,
       imagePrompt: '', imageProvider: 'pollinations', isGeneratingImage: false,
       isGeneratingVoice: false,
+      avatarScript: '', avatarVideoUrl: null, isGeneratingAvatar: false,
     },
   ]);
   const [isRendering, setIsRendering] = useState(false);
@@ -106,6 +110,7 @@ export default function VideoStudioPage() {
       kbDirection: Math.random() > 0.5 ? 1 : -1,
       imagePrompt: '', imageProvider: 'pollinations', isGeneratingImage: false,
       isGeneratingVoice: false,
+      avatarScript: '', avatarVideoUrl: null, isGeneratingAvatar: false,
     }]);
   };
 
@@ -197,6 +202,44 @@ export default function VideoStudioPage() {
       setStatusErr(true);
     } finally {
       updateScene(id, { isGeneratingVoice: false });
+    }
+  };
+
+  // Generate video avatar (talking-head) dari gambar scene + naskah, pakai D-ID.
+  const generateSceneAvatar = async (id: number) => {
+    const scene = scenes.find((s) => s.id === id);
+    if (!scene) return;
+
+    if (!scene.imageUrl) {
+      setStatus('Generate atau upload gambar dulu sebelum bikin avatar AI.');
+      setStatusErr(true);
+      return;
+    }
+    const script = scene.avatarScript.trim() || scene.caption.trim();
+    if (!script) {
+      setStatus('Isi naskah avatar (atau caption) dulu sebelum generate avatar AI.');
+      setStatusErr(true);
+      return;
+    }
+
+    updateScene(id, { isGeneratingAvatar: true });
+    setStatusErr(false);
+    setStatus('Menghasilkan video avatar AI (bisa 20-40 detik)...');
+    try {
+      const res = await fetch('/api/video/avatar-generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: scene.imageUrl, script }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Gagal generate avatar AI.');
+      updateScene(id, { avatarVideoUrl: data.videoUrl });
+      setStatus('Video avatar AI berhasil dibuat untuk scene ini.');
+    } catch (err: any) {
+      setStatus('Gagal generate avatar AI: ' + err.message);
+      setStatusErr(true);
+    } finally {
+      updateScene(id, { isGeneratingAvatar: false });
     }
   };
 
@@ -380,6 +423,7 @@ export default function VideoStudioPage() {
           --bg-void:#15130f; --bg-panel:#201b14; --bg-panel-2:#2a2318; --bg-panel-3:#332a1c;
           --accent-amber:#e8a33d; --accent-amber-dim:#8a642a; --accent-teal:#4a8a80;
           --text-cream:#f3ede1; --text-muted:#b3a892; --border-line:#3a3226; --danger:#c1553d;
+          --accent-violet:#8a6fd8;
         }
         .vs-wrap{max-width:1180px;margin:0 auto;padding:28px 20px 80px;font-family:'Inter',sans-serif;}
         .vs-header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:24px;flex-wrap:wrap;border-bottom:1px solid var(--border-line);padding-bottom:18px;}
@@ -438,6 +482,12 @@ export default function VideoStudioPage() {
         .vs-ai-btn:hover{background:#5da296;}
         .vs-ai-btn:disabled{background:#2f4b46;color:#7d9b95;cursor:not-allowed;}
         .vs-ai-label{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;}
+        .vs-avatar-box{margin-top:10px;padding:10px;background:var(--bg-panel-2);border:1px solid var(--border-line);border-radius:6px;}
+        .vs-avatar-btn{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:12px;background:var(--accent-violet);color:#160f2e;border:none;border-radius:5px;padding:8px 12px;cursor:pointer;white-space:nowrap;}
+        .vs-avatar-btn:hover{background:#a58ce8;}
+        .vs-avatar-btn:disabled{background:#3a3352;color:#8a80a8;cursor:not-allowed;}
+        .vs-avatar-preview{margin-top:10px;border-radius:6px;overflow:hidden;border:1px solid var(--accent-violet);}
+        .vs-avatar-preview video{width:100%;display:block;background:#000;}
       `}</style>
 
       <div className="vs-wrap">
@@ -544,6 +594,34 @@ export default function VideoStudioPage() {
                     </div>
                   </div>
 
+                  <div className="vs-avatar-box">
+                    <span className="vs-ai-label">🧑‍🎤 Generate Avatar AI (talking-head)</span>
+                    <div className="vs-ai-row">
+                      <input
+                        className="vs-ai-input"
+                        type="text"
+                        placeholder="Naskah avatar (kosongkan utk pakai caption)"
+                        value={scene.avatarScript}
+                        onChange={(e) => updateScene(scene.id, { avatarScript: e.target.value })}
+                      />
+                      <button
+                        className="vs-avatar-btn"
+                        disabled={scene.isGeneratingAvatar}
+                        onClick={() => generateSceneAvatar(scene.id)}
+                      >
+                        {scene.isGeneratingAvatar ? 'Membuat avatar...' : '🧑‍🎤 Generate Avatar AI'}
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                      Pakai gambar scene ini (dari + Gambar / Generate Gambar AI di atas) sebagai wajah avatar, lalu dibuat ngomong sesuai naskah. Prosesnya 20-40 detik.
+                    </div>
+                    {scene.avatarVideoUrl && (
+                      <div className="vs-avatar-preview">
+                        <video src={scene.avatarVideoUrl} controls />
+                      </div>
+                    )}
+                  </div>
+
                   <input
                     type="file" accept="image/*" style={{ display: 'none' }}
                     ref={(el) => { fileInputRefs.current[scene.id] = el; }}
@@ -580,6 +658,8 @@ export default function VideoStudioPage() {
               <b>Cara narasi:</b> tiap scene punya tombol <b>🎤 Rekam Suara</b> (mic Anda sendiri), <b>🔊 Coba Baca</b> (Text-to-Speech browser, hanya pratinjau — tidak ikut ke video), dan <b>🗣️ Generate Suara AI</b> (suara wanita hasil AI, otomatis ikut ke video hasil render, dari isi caption scene). Tanpa suara sama sekali, durasi scene pakai slider manual dan bagian itu senyap.
               <br /><br />
               <b>Generate Gambar AI:</b> isi prompt (atau kosongkan untuk memakai caption scene), pilih provider, lalu klik tombol. Pollinations gratis tanpa API key; Gemini butuh <code>GEMINI_API_KEY</code> di Environment Variables.
+              <br /><br />
+              <b>Generate Avatar AI:</b> butuh gambar scene terisi dulu (wajah/produk yang mau "ngomong"), lalu isi naskah. Video avatar hasilnya terpisah dari video hasil Render Video biasa — unduh manual dari kotak pratinjau avatar. Butuh <code>DID_API_KEY</code> di Environment Variables.
             </div>
           </div>
         </div>
