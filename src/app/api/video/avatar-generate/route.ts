@@ -23,21 +23,27 @@ async function ensurePublicImageUrl(image: string): Promise<string> {
     return image;
   }
 
-  // Kalau berupa data URL (base64 dari Pollinations/Gemini), upload dulu ke D-ID Images API.
+  // Parse data URL base64, contoh: data:image/png;base64,xxxxx
+  const match = image.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+  if (!match) {
+    throw new Error(
+      "Format gambar tidak dikenali. Harus berupa URL gambar atau data URL base64 (image/jpeg atau image/png)."
+    );
+  }
+  const mimeType = match[1];
+  const base64Data = match[2];
+  const buffer = Buffer.from(base64Data, "base64");
+  const ext = mimeType.split("/")[1] || "png";
+
+  // D-ID Images API wajib pakai multipart/form-data, bukan JSON.
+  const formData = new FormData();
+  const blob = new Blob([buffer], { type: mimeType });
+  formData.append("image", blob, `avatar.${ext}`);
+
   const res = await fetch(`${DID_API_BASE}/images`, {
     method: "POST",
     headers: {
       Authorization: getDidAuthHeader(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ source_url: image }),
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data?.description || data?.message || "Gagal upload gambar ke D-ID.");
-  }
-  return data.url as string;
 }
 
 async function createTalk(sourceUrl: string, script: string, voiceId: string) {
